@@ -37,6 +37,7 @@ struct UploadForm<'r> {
 struct VideoItem {
     id: String,
     title: String,
+    thumbnail: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,8 +77,14 @@ fn list_videos() -> Vec<VideoItem> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| id.clone());
 
-        if dir_path.join("master.m3u8").exists() {
-            items.push(VideoItem { id, title });
+        let master_exists = dir_path.join("master.m3u8").exists();
+        if master_exists {
+            let thumb_url = dir_path
+                .join("thumb.jpg")
+                .exists()
+                .then(|| format!("/hls/{id}/thumb.jpg"));
+
+            items.push(VideoItem { id, title, thumbnail: thumb_url });
         }
     }
 
@@ -134,6 +141,34 @@ async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> Result<(), Strin
     Ok(())
 }
 
+async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> Result<(), String> {
+    let thumb_path = out_dir.join("thumb.jpg");
+
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-ss")
+        .arg("00:00:01")
+        .arg("-i")
+        .arg(input_mp4)
+        .arg("-vframes")
+        .arg("1")
+        .arg("-vf")
+        .arg("scale=480:-1")
+        .arg(&thumb_path)
+        .status()
+        .await
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("thumbnail ffmpeg exited with status: {status}"));
+    }
+
+    Ok(())
+}
+
 #[get("/")]
 fn index() -> Template {
     let videos = list_videos();
@@ -170,11 +205,16 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Redirect, (Status
     let upload_path_bg = upload_path.clone();
     let out_dir_bg = out_dir.clone();
     task::spawn(async move {
+        let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
         if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
             let _ = fs::write(out_dir_bg.join("error.txt"), e);
         } else {
             // Clean up original upload after successful packaging to save space.
             let _ = fs::remove_file(&upload_path_bg);
+        }
+
+        if let Err(e) = thumb_result {
+            let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
         }
     });
 
@@ -182,15 +222,16 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Redirect, (Status
 }
 
 #[get("/watch/<id>")]
-fn watch(id: String) -> Template {
-    let out_dir = hls_dir().join(&id);
+fn watch(id: &str) -> Template {
+    let id_owned = id.to_string();
+    let out_dir = hls_dir().join(id);
     let master = out_dir.join("master.m3u8");
     let error_path = out_dir.join("error.txt");
 
     let ready = master.exists();
     let error = fs::read_to_string(&error_path).ok();
 
-    let ctx = WatchContext { id: id.clone(), ready, error };
+    let ctx = WatchContext { id: id_owned, ready, error };
     Template::render("watch", context! { ctx })
 }
 
