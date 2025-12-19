@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  hls-tube:
+    build: .
+    container_name: hls-tube
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - ROCKET_ADDRESS=0.0.0.0
+      - ROCKET_PORT=8000
+      - DATA_DIR=/data
+    restart: unless-stopped

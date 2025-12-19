@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>HLS Tube</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    a { text-decoration: none; }
+    .row { padding: 10px 0; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>HLS Tube</h1>
+  <p><a href="/upload">Upload</a></p>
+
+  {% if videos | length == 0 %}
+    <p>No videos yet.</p>
+  {% else %}
+    {% for v in videos %}
+      <div class="row">
+        <a href="/watch/{{ v.id }}"><strong>{{ v.title }}</strong></a><br/>
+        <small>{{ v.id }}</small>
+      </div>
+    {% endfor %}
+  {% endif %}
+</body>
+</html>

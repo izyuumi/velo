@@ -1,0 +1,7 @@
+[default]
+# Increase multipart/form-data limits for video uploads
+limits = { form = "200 MiB", file = "2 GiB", data-form = "2 GiB" }
+
+# These are defaults; env vars still override for container use
+address = "0.0.0.0"
+port = 8000

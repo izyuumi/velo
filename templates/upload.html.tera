@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Upload</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    .drop {
+      margin-top: 16px;
+      border: 2px dashed #6c7ae0;
+      border-radius: 10px;
+      padding: 28px;
+      text-align: center;
+      background: #f7f7ff;
+      transition: background 120ms ease, border-color 120ms ease;
+      cursor: pointer;
+    }
+    .drop.dragover {
+      border-color: #3943d0;
+      background: #eef0ff;
+    }
+    .hint { color: #555; margin-top: 12px; }
+    #status { margin-top: 12px; color: #3943d0; }
+    #error { margin-top: 12px; color: #c62828; }
+    input[type="text"] { width: 100%; max-width: 420px; padding: 8px; font-size: 16px; }
+    .field { margin-top: 12px; }
+    button { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Upload</h1>
+  <p><a href="/">Back</a></p>
+
+  <div class="field">
+    <label>Title (optional)</label><br/>
+    <input id="title" name="title" type="text" placeholder="My vacation clip" />
+  </div>
+
+  <div id="drop" class="drop">
+    <strong>Drag & drop a video</strong><br/>
+    <span class="hint">…or click to pick a file. Upload starts immediately.</span>
+  </div>
+
+  <input id="file" name="video" type="file" accept="video/mp4,video/*" style="display:none" />
+
+  <div id="status"></div>
+  <div id="error"></div>
+
+  <p class="hint">
+    Upload triggers FFmpeg packaging to HLS in the background. Large files will take time; you can refresh the watch page until it’s ready.
+  </p>
+
+  <script>
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('file');
+    const titleInput = document.getElementById('title');
+    const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('error');
+
+    const setStatus = (msg) => { statusEl.textContent = msg || ''; };
+    const setError = (msg) => { errorEl.textContent = msg || ''; };
+
+    drop.addEventListener('click', () => fileInput.click());
+
+    ['dragenter','dragover'].forEach(evt =>
+      drop.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); drop.classList.add('dragover'); })
+    );
+    ['dragleave','drop'].forEach(evt =>
+      drop.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); drop.classList.remove('dragover'); })
+    );
+
+    drop.addEventListener('drop', (e) => {
+      const file = e.dataTransfer.files?.[0];
+      if (file) startUpload(file);
+    });
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (file) startUpload(file);
+    });
+
+    async function startUpload(file) {
+      setError('');
+      setStatus(`Uploading "${file.name}"…`);
+      drop.textContent = 'Uploading…';
+      drop.style.pointerEvents = 'none';
+      titleInput.disabled = true;
+
+      const form = new FormData();
+      form.append('video', file);
+      if (titleInput.value.trim()) form.append('title', titleInput.value.trim());
+
+      try {
+        const resp = await fetch('/upload', { method: 'POST', body: form, redirect: 'follow' });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || `Upload failed (${resp.status})`);
+        }
+        // After redirect, resp.url should be the watch page. Navigate there.
+        window.location.href = resp.url || '/';
+      } catch (err) {
+        setStatus('');
+        setError(err.message || 'Upload failed.');
+        drop.textContent = 'Try again (drag & drop or click)';
+        drop.style.pointerEvents = 'auto';
+        titleInput.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
