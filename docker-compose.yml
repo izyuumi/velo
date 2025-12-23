@@ -5,11 +5,27 @@ services:
     build: .
     container_name: hls-tube
     ports:
-      - "8000:8000"
+      - "35773:8000"
     volumes:
       - ./data:/data
     environment:
       - ROCKET_ADDRESS=0.0.0.0
-      - ROCKET_PORT=8000
       - DATA_DIR=/data
+      - DATABASE_URL=postgres://hls_user:hls_pass@db:5432/hls_tube
+    depends_on:
+      - db
     restart: unless-stopped
+
+  db:
+    image: postgres:16
+    container_name: hls-tube-db
+    environment:
+      - POSTGRES_USER=hls_user
+      - POSTGRES_PASSWORD=hls_pass
+      - POSTGRES_DB=hls_tube
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
