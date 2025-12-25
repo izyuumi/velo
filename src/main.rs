@@ -2,9 +2,9 @@
 extern crate rocket;
 
 use rocket::form::Form;
-use rocket::fs::{FileServer, TempFile};
-use rocket::http::Status;
-use rocket::response::Redirect;
+use rocket::fs::{FileServer, NamedFile, TempFile};
+use rocket::http::{ContentType, Status};
+use rocket::serde::json::Json;
 use rocket::tokio::process::Command;
 use rocket::tokio::task;
 use rocket_dyn_templates::{context, Template};
@@ -29,8 +29,8 @@ fn hls_dir() -> PathBuf {
 
 #[derive(FromForm)]
 struct UploadForm<'r> {
-    video: TempFile<'r>,
-    title: Option<&'r str>,
+    video: Vec<TempFile<'r>>,
+    title: Vec<&'r str>,
 }
 
 #[derive(Serialize)]
@@ -47,9 +47,22 @@ struct WatchContext {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct UploadResult {
+    id: String,
+    title: String,
+    watch_url: String,
+}
+
+#[derive(Serialize)]
+struct UploadResponse {
+    items: Vec<UploadResult>,
+}
+
 fn ensure_dirs() -> std::io::Result<()> {
     fs::create_dir_all(upload_dir())?;
     fs::create_dir_all(hls_dir())?;
+    fs::create_dir_all(Path::new("static").join("vendor"))?;
     Ok(())
 }
 
@@ -90,6 +103,24 @@ fn list_videos() -> Vec<VideoItem> {
 
     items.sort_by(|a, b| b.id.cmp(&a.id));
     items
+}
+
+#[get("/static/vendor/hls.min.js")]
+async fn hls_js() -> Option<(ContentType, NamedFile)> {
+    let path = Path::new("static/vendor/hls.min.js");
+    NamedFile::open(path)
+        .await
+        .ok()
+        .map(|file| (ContentType::JavaScript, file))
+}
+
+#[get("/static/vendor/hls.min.js.map")]
+async fn hls_js_map() -> Option<(ContentType, NamedFile)> {
+    let path = Path::new("static/vendor/hls.min.js.map");
+    NamedFile::open(path)
+        .await
+        .ok()
+        .map(|file| (ContentType::JSON, file))
 }
 
 async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> Result<(), String> {
@@ -181,44 +212,60 @@ fn upload_page() -> Template {
 }
 
 #[post("/upload", data = "<form>")]
-async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Redirect, (Status, String)> {
+async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResponse>, (Status, String)> {
     ensure_dirs().map_err(|e| (Status::InternalServerError, e.to_string()))?;
 
-    let id = Uuid::new_v4().to_string();
-    let title = form.title.unwrap_or("").trim().to_string();
-
-    let upload_path = upload_dir().join(format!("{id}.mp4"));
-    let out_dir = hls_dir().join(&id);
-
-    fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
-
-    form.video
-        .persist_to(&upload_path)
-        .await
-        .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
-
-    if !title.is_empty() {
-        let _ = fs::write(out_dir.join("title.txt"), title);
+    if form.video.is_empty() {
+        return Err((Status::BadRequest, "no files uploaded".to_string()));
     }
 
-    // Spawn background processing so the request returns immediately.
-    let upload_path_bg = upload_path.clone();
-    let out_dir_bg = out_dir.clone();
-    task::spawn(async move {
-        let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
-        if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
-            let _ = fs::write(out_dir_bg.join("error.txt"), e);
-        } else {
-            // Clean up original upload after successful packaging to save space.
-            let _ = fs::remove_file(&upload_path_bg);
+    let mut items = Vec::new();
+
+    let titles: Vec<String> = form.title.iter().map(|t| t.trim().to_string()).collect();
+
+    for (idx, video) in form.video.iter_mut().enumerate() {
+        let id = Uuid::new_v4().to_string();
+        let title = titles.get(idx).cloned().unwrap_or_default();
+
+        let upload_path = upload_dir().join(format!("{id}.mp4"));
+        let out_dir = hls_dir().join(&id);
+
+        fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
+
+        video
+            .persist_to(&upload_path)
+            .await
+            .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
+
+        if !title.is_empty() {
+            let _ = fs::write(out_dir.join("title.txt"), &title);
         }
 
-        if let Err(e) = thumb_result {
-            let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
-        }
-    });
+        // Spawn background processing so the request returns immediately.
+        let upload_path_bg = upload_path.clone();
+        let out_dir_bg = out_dir.clone();
+        task::spawn(async move {
+            let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
+            if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
+                let _ = fs::write(out_dir_bg.join("error.txt"), e);
+            } else {
+                // Clean up original upload after successful packaging to save space.
+                let _ = fs::remove_file(&upload_path_bg);
+            }
 
-    Ok(Redirect::to(uri!(watch(id = id))))
+            if let Err(e) = thumb_result {
+                let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
+            }
+        });
+
+        items.push(UploadResult {
+            id: id.clone(),
+            title,
+            watch_url: format!("/watch/{id}"),
+        });
+    }
+
+    Ok(Json(UploadResponse { items }))
 }
 
 #[get("/watch/<id>")]
@@ -240,9 +287,11 @@ fn rocket() -> _ {
     ensure_dirs().ok();
 
     let hls_path = hls_dir();
+    let static_path = PathBuf::from("static");
 
     rocket::build()
-        .mount("/", routes![index, upload_page, upload_post, watch])
+        .mount("/", routes![index, upload_page, upload_post, watch, hls_js, hls_js_map])
         .mount("/hls", FileServer::from(hls_path))
+        .mount("/static", FileServer::from(static_path))
         .attach(Template::fairing())
 }

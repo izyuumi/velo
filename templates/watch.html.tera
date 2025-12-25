@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Watch</title>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="/static/vendor/hls.min.js"></script>
 </head>
 <body style="font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px;">
   <p><a href="/">Back</a></p>
@@ -16,6 +16,12 @@
     <script>
       const video = document.getElementById('video');
       const src = `/hls/{{ ctx.id }}/master.m3u8`;
+
+      window.addEventListener('unhandledrejection', (event) => {
+        if (event.reason && event.reason.name === 'AbortError') {
+          event.preventDefault();
+        }
+      });
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;

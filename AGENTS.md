@@ -23,7 +23,7 @@
 - Name test functions `test_<route|behavior>`; place under `tests/` or `src/` modules as appropriate.
 
 ## Commit & Pull Request Guidelines
-- Commit messages: concise imperative (e.g., “add background ffmpeg task”, “tweak upload limits”).
+- Commit messages: concise imperative conventional commit messages (e.g., “feat: add background ffmpeg task”, “fix: tweak upload limits”).
 - PRs should include: summary of user-visible changes, how to run/validate (`cargo check`, manual upload), and screenshots/GIFs for UI tweaks (upload drag-drop, watch page states).
 
 ## Security & Configuration Tips

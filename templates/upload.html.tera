@@ -25,7 +25,11 @@
     #error { margin-top: 12px; color: #c62828; }
     input[type="text"] { width: 100%; max-width: 420px; padding: 8px; font-size: 16px; }
     .field { margin-top: 12px; }
-    button { display: none; }
+    .queue { margin-top: 8px; }
+    .queue-item { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+    .queue-name { font-size: 14px; color: #333; min-width: 160px; }
+    .queue-item input { flex: 1; }
+    button { margin-top: 16px; padding: 10px 16px; font-size: 15px; }
   </style>
 </head>
 <body>
@@ -33,19 +37,22 @@
   <p><a href="/">Back</a></p>
 
   <div class="field">
-    <label>Title (optional)</label><br/>
-    <input id="title" name="title" type="text" placeholder="My vacation clip" />
+    <label>Titles (optional)</label><br/>
+    <div id="queue" class="queue hint">Add files to set titles.</div>
   </div>
 
   <div id="drop" class="drop">
-    <strong>Drag & drop a video</strong><br/>
-    <span class="hint">…or click to pick a file. Upload starts immediately.</span>
+    <strong>Drag & drop videos</strong><br/>
+    <span class="hint">…or click to pick one or more files. Upload starts immediately.</span>
   </div>
 
-  <input id="file" name="video" type="file" accept="video/mp4,video/*" style="display:none" />
+  <input id="file" name="video" type="file" accept="video/mp4,video/*" multiple style="display:none" />
 
   <div id="status"></div>
   <div id="error"></div>
+  <ul id="results" class="hint" style="padding-left: 18px;"></ul>
+
+  <button id="uploadBtn" type="button" disabled>Start upload</button>
 
   <p class="hint">
     Upload triggers FFmpeg packaging to HLS in the background. Large files will take time; you can refresh the watch page until it’s ready.
@@ -54,9 +61,11 @@
   <script>
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('file');
-    const titleInput = document.getElementById('title');
+    const queueEl = document.getElementById('queue');
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
+    const resultsEl = document.getElementById('results');
+    const uploadBtn = document.getElementById('uploadBtn');
 
     const setStatus = (msg) => { statusEl.textContent = msg || ''; };
     const setError = (msg) => { errorEl.textContent = msg || ''; };
@@ -71,42 +80,116 @@
     );
 
     drop.addEventListener('drop', (e) => {
-      const file = e.dataTransfer.files?.[0];
-      if (file) startUpload(file);
+      const files = e.dataTransfer.files;
+      if (files?.length) addFiles(files);
     });
 
     fileInput.addEventListener('change', () => {
-      const file = fileInput.files?.[0];
-      if (file) startUpload(file);
+      const files = fileInput.files;
+      if (files?.length) addFiles(files);
+      fileInput.value = '';
     });
 
-    async function startUpload(file) {
+    let uploading = false;
+    const files = [];
+
+    function addFiles(fileList) {
+      for (const file of Array.from(fileList)) {
+        files.push(file);
+      }
+      renderQueue();
+    }
+
+    function renderQueue() {
+      queueEl.textContent = '';
+      if (!files.length) {
+        queueEl.textContent = 'Add files to set titles.';
+        uploadBtn.disabled = true;
+        return;
+      }
+      files.forEach((file, idx) => {
+        const row = document.createElement('div');
+        row.className = 'queue-item';
+
+        const name = document.createElement('div');
+        name.className = 'queue-name';
+        name.textContent = file.name;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Optional title';
+        input.dataset.idx = String(idx);
+
+        row.appendChild(name);
+        row.appendChild(input);
+        queueEl.appendChild(row);
+      });
+      uploadBtn.disabled = false;
+    }
+
+    function setBusy(busy) {
+      drop.textContent = busy ? 'Uploading…' : 'Drag & drop videos';
+      drop.style.pointerEvents = busy ? 'none' : 'auto';
+      fileInput.disabled = busy;
+      uploadBtn.disabled = busy;
+      queueEl.querySelectorAll('input').forEach((input) => {
+        input.disabled = busy;
+      });
+    }
+
+    async function startUpload() {
+      if (!files.length || uploading) return;
+      uploading = true;
       setError('');
-      setStatus(`Uploading "${file.name}"…`);
-      drop.textContent = 'Uploading…';
-      drop.style.pointerEvents = 'none';
-      titleInput.disabled = true;
+      setStatus(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`);
+      resultsEl.textContent = '';
+      setBusy(true);
+
+      const titles = Array.from(queueEl.querySelectorAll('input[data-idx]'))
+        .map(input => input.value.trim());
 
       const form = new FormData();
-      form.append('video', file);
-      if (titleInput.value.trim()) form.append('title', titleInput.value.trim());
+      files.forEach((file, idx) => {
+        form.append('video', file);
+        form.append('title', titles[idx] || '');
+      });
 
       try {
-        const resp = await fetch('/upload', { method: 'POST', body: form, redirect: 'follow' });
+        const resp = await fetch('/upload', { method: 'POST', body: form });
         if (!resp.ok) {
           const text = await resp.text();
           throw new Error(text || `Upload failed (${resp.status})`);
         }
-        // After redirect, resp.url should be the watch page. Navigate there.
-        window.location.href = resp.url || '/';
+        const payload = await resp.json();
+        const items = payload?.items || [];
+        if (!items.length) throw new Error('Upload finished with no results.');
+
+        if (items.length === 1 && items[0].watch_url) {
+          window.location.href = items[0].watch_url;
+          return;
+        }
+
+        items.forEach((item, idx) => {
+          const row = document.createElement('li');
+          const link = document.createElement('a');
+          link.href = item.watch_url || '/';
+          link.textContent = item.title || files[idx]?.name || 'View upload';
+          row.appendChild(link);
+          resultsEl.appendChild(row);
+        });
+        setStatus('All uploads finished.');
+        files.length = 0;
+        renderQueue();
       } catch (err) {
         setStatus('');
         setError(err.message || 'Upload failed.');
-        drop.textContent = 'Try again (drag & drop or click)';
-        drop.style.pointerEvents = 'auto';
-        titleInput.disabled = false;
+      } finally {
+        uploading = false;
+        setBusy(false);
       }
     }
+
+    uploadBtn.addEventListener('click', startUpload);
   </script>
 </body>
 </html>
