@@ -119,6 +119,7 @@
         input.type = 'text';
         input.placeholder = 'Optional title';
         input.dataset.idx = String(idx);
+        input.value = file.name;
 
         row.appendChild(name);
         row.appendChild(input);
@@ -148,35 +149,31 @@
       const titles = Array.from(queueEl.querySelectorAll('input[data-idx]'))
         .map(input => input.value.trim());
 
-      const form = new FormData();
-      files.forEach((file, idx) => {
-        form.append('video', file);
-        form.append('title', titles[idx] || '');
-      });
-
       try {
-        const resp = await fetch('/upload', { method: 'POST', body: form });
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(text || `Upload failed (${resp.status})`);
-        }
-        const payload = await resp.json();
-        const items = payload?.items || [];
-        if (!items.length) throw new Error('Upload finished with no results.');
+        for (let idx = 0; idx < files.length; idx += 1) {
+          const file = files[idx];
+          const title = titles[idx] || file.name;
+          const form = new FormData();
+          form.append('video', file);
+          form.append('title', title);
 
-        if (items.length === 1 && items[0].watch_url) {
-          window.location.href = items[0].watch_url;
-          return;
-        }
-
-        items.forEach((item, idx) => {
+          const resp = await fetch('/upload', { method: 'POST', body: form });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `Upload failed (${resp.status})`);
+          }
+          const item = await resp.json();
+          if (files.length === 1 && item.watch_url) {
+            window.location.href = item.watch_url;
+            return;
+          }
           const row = document.createElement('li');
           const link = document.createElement('a');
           link.href = item.watch_url || '/';
-          link.textContent = item.title || files[idx]?.name || 'View upload';
+          link.textContent = item.title || file.name || 'View upload';
           row.appendChild(link);
           resultsEl.appendChild(row);
-        });
+        }
         setStatus('All uploads finished.');
         files.length = 0;
         renderQueue();

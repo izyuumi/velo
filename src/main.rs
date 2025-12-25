@@ -29,8 +29,8 @@ fn hls_dir() -> PathBuf {
 
 #[derive(FromForm)]
 struct UploadForm<'r> {
-    video: Vec<TempFile<'r>>,
-    title: Vec<&'r str>,
+    video: TempFile<'r>,
+    title: Option<&'r str>,
 }
 
 #[derive(Serialize)]
@@ -52,11 +52,6 @@ struct UploadResult {
     id: String,
     title: String,
     watch_url: String,
-}
-
-#[derive(Serialize)]
-struct UploadResponse {
-    items: Vec<UploadResult>,
 }
 
 fn ensure_dirs() -> std::io::Result<()> {
@@ -212,60 +207,48 @@ fn upload_page() -> Template {
 }
 
 #[post("/upload", data = "<form>")]
-async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResponse>, (Status, String)> {
+async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult>, (Status, String)> {
     ensure_dirs().map_err(|e| (Status::InternalServerError, e.to_string()))?;
 
-    if form.video.is_empty() {
-        return Err((Status::BadRequest, "no files uploaded".to_string()));
+    let id = Uuid::new_v4().to_string();
+    let title = form.title.unwrap_or("").trim().to_string();
+
+    let upload_path = upload_dir().join(format!("{id}.mp4"));
+    let out_dir = hls_dir().join(&id);
+
+    fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
+
+    form.video
+        .persist_to(&upload_path)
+        .await
+        .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
+
+    if !title.is_empty() {
+        let _ = fs::write(out_dir.join("title.txt"), &title);
     }
 
-    let mut items = Vec::new();
-
-    let titles: Vec<String> = form.title.iter().map(|t| t.trim().to_string()).collect();
-
-    for (idx, video) in form.video.iter_mut().enumerate() {
-        let id = Uuid::new_v4().to_string();
-        let title = titles.get(idx).cloned().unwrap_or_default();
-
-        let upload_path = upload_dir().join(format!("{id}.mp4"));
-        let out_dir = hls_dir().join(&id);
-
-        fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
-
-        video
-            .persist_to(&upload_path)
-            .await
-            .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
-
-        if !title.is_empty() {
-            let _ = fs::write(out_dir.join("title.txt"), &title);
+    // Spawn background processing so the request returns immediately.
+    let upload_path_bg = upload_path.clone();
+    let out_dir_bg = out_dir.clone();
+    task::spawn(async move {
+        let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
+        if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
+            let _ = fs::write(out_dir_bg.join("error.txt"), e);
+        } else {
+            // Clean up original upload after successful packaging to save space.
+            let _ = fs::remove_file(&upload_path_bg);
         }
 
-        // Spawn background processing so the request returns immediately.
-        let upload_path_bg = upload_path.clone();
-        let out_dir_bg = out_dir.clone();
-        task::spawn(async move {
-            let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
-            if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
-                let _ = fs::write(out_dir_bg.join("error.txt"), e);
-            } else {
-                // Clean up original upload after successful packaging to save space.
-                let _ = fs::remove_file(&upload_path_bg);
-            }
+        if let Err(e) = thumb_result {
+            let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
+        }
+    });
 
-            if let Err(e) = thumb_result {
-                let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
-            }
-        });
-
-        items.push(UploadResult {
-            id: id.clone(),
-            title,
-            watch_url: format!("/watch/{id}"),
-        });
-    }
-
-    Ok(Json(UploadResponse { items }))
+    Ok(Json(UploadResult {
+        id: id.clone(),
+        title,
+        watch_url: format!("/watch/{id}"),
+    }))
 }
 
 #[get("/watch/<id>")]
