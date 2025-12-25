@@ -4,17 +4,26 @@
   <meta charset="utf-8" />
   <title>Watch</title>
   <script src="/static/vendor/hls.min.js"></script>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    .notice { padding: 10px 12px; border-radius: 8px; margin: 12px 0; }
+    .notice.error { background: #ffe8e8; color: #8a1f1f; }
+    .notice.info { background: #eef3ff; color: #1f3d8a; }
+  </style>
 </head>
-<body style="font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px;">
+<body>
   <p><a href="/">Back</a></p>
   <h1>Watch</h1>
 
   {% if ctx.error %}
-    <p style="color: red;">Processing failed: {{ ctx.error }}</p>
+    <p class="notice error">Processing failed: {{ ctx.error }}</p>
   {% elif ctx.ready %}
+    <p id="playerStatus" class="notice info" style="display:none;"></p>
     <video id="video" controls style="width: 100%; max-height: 70vh;"></video>
     <script>
       const video = document.getElementById('video');
+      const statusEl = document.getElementById('playerStatus');
       const src = `/hls/{{ ctx.id }}/master.m3u8`;
 
       window.addEventListener('unhandledrejection', (event) => {
@@ -23,18 +32,33 @@
         }
       });
 
+      function setPlayerStatus(msg) {
+        if (!statusEl) return;
+        statusEl.textContent = msg || '';
+        statusEl.style.display = msg ? 'block' : 'none';
+      }
+
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;
       } else if (Hls.isSupported()) {
         const hls = new Hls();
         hls.loadSource(src);
         hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, function (_event, data) {
+          if (data && data.fatal) {
+            setPlayerStatus('Playback failed. Try refreshing or re-uploading the video.');
+          }
+        });
       } else {
-        video.outerHTML = "<p>Your browser can't play HLS. Try Safari or a modern Chrome/Firefox.</p>";
+        video.outerHTML = "<p class=\"notice error\">Your browser can't play HLS. Try Safari or a modern Chrome/Firefox.</p>";
       }
+
+      video.addEventListener('error', () => {
+        setPlayerStatus('We hit a playback error. Refresh the page or try again later.');
+      });
     </script>
   {% else %}
-    <p>Processing… refresh in a moment. If this takes too long, check your upload size and format.</p>
+    <p class="notice info">Processing… refresh in a moment. If this takes too long, check your upload size and format.</p>
   {% endif %}
 </body>
 </html>

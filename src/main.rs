@@ -1,9 +1,12 @@
 #[macro_use]
 extern crate rocket;
 
+mod error;
+
 use rocket::form::Form;
 use rocket::fs::{FileServer, NamedFile, TempFile};
 use rocket::http::{ContentType, Status};
+use rocket::Request;
 use rocket::serde::json::Json;
 use rocket::tokio::process::Command;
 use rocket::tokio::task;
@@ -11,7 +14,9 @@ use rocket_dyn_templates::{context, Template};
 use serde::Serialize;
 use std::{env, fs};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use crate::error::{AppError, AppResult, ApiError, to_api_error};
 
 fn data_root() -> PathBuf {
     env::var("DATA_DIR")
@@ -25,6 +30,10 @@ fn upload_dir() -> PathBuf {
 
 fn hls_dir() -> PathBuf {
     data_root().join("hls")
+}
+
+fn logs_dir() -> PathBuf {
+    data_root().join("logs")
 }
 
 #[derive(FromForm)]
@@ -54,10 +63,23 @@ struct UploadResult {
     watch_url: String,
 }
 
-fn ensure_dirs() -> std::io::Result<()> {
-    fs::create_dir_all(upload_dir())?;
-    fs::create_dir_all(hls_dir())?;
-    fs::create_dir_all(Path::new("static").join("vendor"))?;
+fn ensure_dirs() -> AppResult<()> {
+    fs::create_dir_all(upload_dir()).map_err(|e| AppError::Storage {
+        action: "creating upload directory",
+        source: e,
+    })?;
+    fs::create_dir_all(hls_dir()).map_err(|e| AppError::Storage {
+        action: "creating HLS directory",
+        source: e,
+    })?;
+    fs::create_dir_all(Path::new("static").join("vendor")).map_err(|e| AppError::Storage {
+        action: "creating static vendor directory",
+        source: e,
+    })?;
+    fs::create_dir_all(logs_dir()).map_err(|e| AppError::Storage {
+        action: "creating logs directory",
+        source: e,
+    })?;
     Ok(())
 }
 
@@ -100,6 +122,48 @@ fn list_videos() -> Vec<VideoItem> {
     items
 }
 
+fn processing_log_path(id: &str) -> PathBuf {
+    logs_dir().join(format!("{id}.log"))
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    value.replace('\n', " ").replace('\r', " ")
+}
+
+fn write_processing_log(id: &str, level: &str, message: &str, detail: &str) -> std::io::Result<()> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!(
+        "ts={ts} level={level} id={id} user_message={} detail={}\n",
+        sanitize_log_value(message),
+        sanitize_log_value(detail)
+    );
+    let path = processing_log_path(id);
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+    use std::io::Write;
+    file.write_all(line.as_bytes())
+}
+
+fn read_processing_error(id: &str) -> Option<String> {
+    let contents = fs::read_to_string(processing_log_path(id)).ok()?;
+    for line in contents.lines().rev() {
+        if !line.contains("level=ERROR") {
+            continue;
+        }
+        if let Some(start) = line.find("user_message=") {
+            let msg_start = start + "user_message=".len();
+            let remainder = &line[msg_start..];
+            if let Some(end) = remainder.find(" detail=") {
+                return Some(remainder[..end].trim().to_string());
+            }
+            return Some(remainder.trim().to_string());
+        }
+    }
+    None
+}
+
 #[get("/static/vendor/hls.min.js")]
 async fn hls_js() -> Option<(ContentType, NamedFile)> {
     let path = Path::new("static/vendor/hls.min.js");
@@ -118,7 +182,7 @@ async fn hls_js_map() -> Option<(ContentType, NamedFile)> {
         .map(|file| (ContentType::JSON, file))
 }
 
-async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> Result<(), String> {
+async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
     let master = out_dir.join("master.m3u8");
     let segment_pattern = out_dir.join("seg_%03d.ts");
 
@@ -158,16 +222,20 @@ async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> Result<(), Strin
     let status = cmd
         .status()
         .await
-        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+        .map_err(|e| AppError::Ffmpeg {
+            message: format!("ffmpeg spawn failed: {e}"),
+        })?;
 
     if !status.success() {
-        return Err(format!("ffmpeg exited with status: {status}"));
+        return Err(AppError::Ffmpeg {
+            message: format!("ffmpeg exited with status: {status}"),
+        });
     }
 
     Ok(())
 }
 
-async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> Result<(), String> {
+async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
     let thumb_path = out_dir.join("thumb.jpg");
 
     let status = Command::new("ffmpeg")
@@ -186,10 +254,14 @@ async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> Result<(), Stri
         .arg(&thumb_path)
         .status()
         .await
-        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+        .map_err(|e| AppError::Ffmpeg {
+            message: format!("ffmpeg spawn failed: {e}"),
+        })?;
 
     if !status.success() {
-        return Err(format!("thumbnail ffmpeg exited with status: {status}"));
+        return Err(AppError::Ffmpeg {
+            message: format!("thumbnail ffmpeg exited with status: {status}"),
+        });
     }
 
     Ok(())
@@ -207,8 +279,10 @@ fn upload_page() -> Template {
 }
 
 #[post("/upload", data = "<form>")]
-async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult>, (Status, String)> {
-    ensure_dirs().map_err(|e| (Status::InternalServerError, e.to_string()))?;
+async fn upload_post(
+    mut form: Form<UploadForm<'_>>,
+) -> Result<Json<UploadResult>, (Status, Json<ApiError>)> {
+    ensure_dirs().map_err(to_api_error)?;
 
     let id = Uuid::new_v4().to_string();
     let title = form.title.unwrap_or("").trim().to_string();
@@ -216,7 +290,12 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult
     let upload_path = upload_dir().join(format!("{id}.mp4"));
     let out_dir = hls_dir().join(&id);
 
-    fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
+    fs::create_dir_all(&out_dir).map_err(|e| {
+        to_api_error(AppError::Storage {
+            action: "creating output directory",
+            source: e,
+        })
+    })?;
 
     if let Err(e) = form.video.persist_to(&upload_path).await {
         if e.raw_os_error() == Some(18) {
@@ -224,9 +303,15 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult
             form.video
                 .copy_to(&upload_path)
                 .await
-                .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
+                .map_err(|e| {
+                    to_api_error(AppError::Upload {
+                        message: format!("Saving the upload failed: {e}"),
+                    })
+                })?;
         } else {
-            return Err((Status::InternalServerError, format!("save upload failed: {e}")));
+            return Err(to_api_error(AppError::Upload {
+                message: format!("Saving the upload failed: {e}"),
+            }));
         }
     }
 
@@ -237,17 +322,23 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult
     // Spawn background processing so the request returns immediately.
     let upload_path_bg = upload_path.clone();
     let out_dir_bg = out_dir.clone();
+    let id_bg = id.clone();
     task::spawn(async move {
         let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
         if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
-            let _ = fs::write(out_dir_bg.join("error.txt"), e);
+            let _ = write_processing_log(&id_bg, "ERROR", &e.user_message(), &e.detail_message());
         } else {
             // Clean up original upload after successful packaging to save space.
             let _ = fs::remove_file(&upload_path_bg);
         }
 
         if let Err(e) = thumb_result {
-            let _ = fs::write(out_dir_bg.join("thumb_error.txt"), e);
+            let _ = write_processing_log(
+                &id_bg,
+                "WARN",
+                "Thumbnail generation failed. The video might be unsupported.",
+                &e.detail_message(),
+            );
         }
     });
 
@@ -263,13 +354,48 @@ fn watch(id: &str) -> Template {
     let id_owned = id.to_string();
     let out_dir = hls_dir().join(id);
     let master = out_dir.join("master.m3u8");
-    let error_path = out_dir.join("error.txt");
+    let error = read_processing_error(id);
 
     let ready = master.exists();
-    let error = fs::read_to_string(&error_path).ok();
 
     let ctx = WatchContext { id: id_owned, ready, error };
     Template::render("watch", context! { ctx })
+}
+
+#[catch(404)]
+fn not_found(req: &Request<'_>) -> Template {
+    Template::render(
+        "error",
+        context! {
+            code: 404,
+            title: "Not Found",
+            message: format!("We couldn't find {}", req.uri()),
+        },
+    )
+}
+
+#[catch(413)]
+fn payload_too_large() -> Template {
+    Template::render(
+        "error",
+        context! {
+            code: 413,
+            title: "Upload Too Large",
+            message: "That file is larger than the server allows. Try a smaller upload or adjust Rocket.toml limits.",
+        },
+    )
+}
+
+#[catch(500)]
+fn server_error() -> Template {
+    Template::render(
+        "error",
+        context! {
+            code: 500,
+            title: "Server Error",
+            message: "Something went wrong on the server. Please try again in a moment.",
+        },
+    )
 }
 
 #[launch]
@@ -284,4 +410,5 @@ fn rocket() -> _ {
         .mount("/hls", FileServer::from(hls_path))
         .mount("/static", FileServer::from(static_path))
         .attach(Template::fairing())
+        .register("/", catchers![not_found, payload_too_large, server_error])
 }

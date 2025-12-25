@@ -138,6 +138,17 @@
       });
     }
 
+    async function readErrorMessage(resp) {
+      try {
+        const data = await resp.json();
+        if (data && data.message) return data.message;
+      } catch (err) {
+        // Ignore JSON parsing errors and fall back to text.
+      }
+      const text = await resp.text();
+      return text || `Upload failed (${resp.status})`;
+    }
+
     async function startUpload() {
       if (!files.length || uploading) return;
       uploading = true;
@@ -159,8 +170,8 @@
 
           const resp = await fetch('/upload', { method: 'POST', body: form });
           if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(text || `Upload failed (${resp.status})`);
+            const message = await readErrorMessage(resp);
+            throw new Error(message);
           }
           const item = await resp.json();
           if (files.length === 1 && item.watch_url) {
@@ -179,7 +190,7 @@
         renderQueue();
       } catch (err) {
         setStatus('');
-        setError(err.message || 'Upload failed.');
+        setError(err && err.message ? err.message : 'Upload failed. Please try again.');
       } finally {
         uploading = false;
         setBusy(false);
