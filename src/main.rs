@@ -218,10 +218,17 @@ async fn upload_post(mut form: Form<UploadForm<'_>>) -> Result<Json<UploadResult
 
     fs::create_dir_all(&out_dir).map_err(|e| (Status::InternalServerError, e.to_string()))?;
 
-    form.video
-        .persist_to(&upload_path)
-        .await
-        .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
+    if let Err(e) = form.video.persist_to(&upload_path).await {
+        if e.raw_os_error() == Some(18) {
+            // Fallback to copy when temp storage and data dir are on different volumes.
+            form.video
+                .copy_to(&upload_path)
+                .await
+                .map_err(|e| (Status::InternalServerError, format!("save upload failed: {e}")))?;
+        } else {
+            return Err((Status::InternalServerError, format!("save upload failed: {e}")));
+        }
+    }
 
     if !title.is_empty() {
         let _ = fs::write(out_dir.join("title.txt"), &title);

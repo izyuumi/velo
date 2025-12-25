@@ -7,6 +7,7 @@ RUN apt-get update && \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./ 
 COPY src ./src
+COPY Rocket.toml ./Rocket.toml
 COPY templates ./templates
 
 RUN cargo build --release
@@ -22,6 +23,7 @@ ENV DATA_DIR=/data
 
 WORKDIR /app
 COPY --from=builder /app/target/release/video_hosted /usr/local/bin/hls-tube
+COPY Rocket.toml ./Rocket.toml
 COPY templates ./templates
 
 VOLUME ["/data"]
