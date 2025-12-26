@@ -1,6 +1,7 @@
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use serde::Serialize;
+use sqlx::Error as SqlxError;
 use thiserror::Error;
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -17,6 +18,12 @@ pub enum AppError {
     Upload { message: String },
     #[error("ffmpeg failed: {message}")]
     Ffmpeg { message: String },
+    #[error("database error while {action}")]
+    Database {
+        action: &'static str,
+        #[source]
+        source: SqlxError,
+    },
 }
 
 #[derive(Serialize)]
@@ -28,7 +35,9 @@ impl AppError {
     pub fn api_status(&self) -> Status {
         match self {
             AppError::Upload { .. } => Status::BadRequest,
-            AppError::Storage { .. } | AppError::Ffmpeg { .. } => Status::InternalServerError,
+            AppError::Storage { .. } | AppError::Ffmpeg { .. } | AppError::Database { .. } => {
+                Status::InternalServerError
+            }
         }
     }
 
@@ -40,6 +49,9 @@ impl AppError {
                 "Processing failed. Ensure ffmpeg is installed and the video format is supported."
                     .to_string()
             }
+            AppError::Database { .. } => {
+                "Server error accessing the video catalog. Please try again.".to_string()
+            }
         }
     }
 
@@ -49,6 +61,9 @@ impl AppError {
                 format!("storage error while {action}: {source}")
             }
             AppError::Upload { message } | AppError::Ffmpeg { message } => message.clone(),
+            AppError::Database { action, source } => {
+                format!("database error while {action}: {source}")
+            }
         }
     }
 }

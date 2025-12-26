@@ -11,21 +11,5 @@ services:
     environment:
       - ROCKET_ADDRESS=0.0.0.0
       - DATA_DIR=/data
-      - DATABASE_URL=postgres://hls_user:hls_pass@db:5432/hls_tube
-    depends_on:
-      - db
+      - SQLITE_PATH=/data/app.db
     restart: unless-stopped
-
-  db:
-    image: postgres:16
-    container_name: hls-tube-db
-    environment:
-      - POSTGRES_USER=hls_user
-      - POSTGRES_PASSWORD=hls_pass
-      - POSTGRES_DB=hls_tube
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-
-volumes:
-  pgdata:
