@@ -5,11 +5,32 @@
   <title>Watch</title>
   <script src="/static/vendor/hls.min.js"></script>
   <style>
-    :root { color-scheme: light; }
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    :root {
+      color-scheme: light dark;
+      --bg: #f9fafc;
+      --text: #1f1f1f;
+      --link: #3943d0;
+      --notice-error-bg: #ffe8e8;
+      --notice-error-text: #8a1f1f;
+      --notice-info-bg: #eef3ff;
+      --notice-info-text: #1f3d8a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1116;
+        --text: #f1f2f4;
+        --link: #8ea2ff;
+        --notice-error-bg: #3b1a1c;
+        --notice-error-text: #ffb4b4;
+        --notice-info-bg: #1a2236;
+        --notice-info-text: #b9c7ff;
+      }
+    }
+    body { font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; background: var(--bg); color: var(--text); }
+    a { color: var(--link); }
     .notice { padding: 10px 12px; border-radius: 8px; margin: 12px 0; }
-    .notice.error { background: #ffe8e8; color: #8a1f1f; }
-    .notice.info { background: #eef3ff; color: #1f3d8a; }
+    .notice.error { background: var(--notice-error-bg); color: var(--notice-error-text); }
+    .notice.info { background: var(--notice-info-bg); color: var(--notice-info-text); }
   </style>
 </head>
 <body>

@@ -4,9 +4,34 @@
   <meta charset="utf-8" />
   <title>HLS Tube</title>
   <style>
-    :root { color-scheme: light; }
-    body { font-family: "Inter", system-ui, -apple-system, sans-serif; max-width: 1080px; margin: 24px auto; padding: 0 12px; background: #fafafa; }
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --text: #1f1f1f;
+      --muted: #555;
+      --card: #ffffff;
+      --shadow: rgba(0,0,0,0.06);
+      --shadow-hover: rgba(0,0,0,0.1);
+      --thumb-1: #c3d9ff;
+      --thumb-2: #e8f0ff;
+      --link: #3943d0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1116;
+        --text: #f1f2f4;
+        --muted: #a7adba;
+        --card: #1b1f2a;
+        --shadow: rgba(0,0,0,0.35);
+        --shadow-hover: rgba(0,0,0,0.45);
+        --thumb-1: #1e2a44;
+        --thumb-2: #2c394f;
+        --link: #8ea2ff;
+      }
+    }
+    body { font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; max-width: 1080px; margin: 24px auto; padding: 0 12px; background: var(--bg); color: var(--text); }
     a { text-decoration: none; color: inherit; }
+    .accent { color: var(--link); }
     .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .grid {
       display: grid;
@@ -15,22 +40,22 @@
       align-items: start;
     }
     .card {
-      background: #fff;
+      background: var(--card);
       border-radius: 12px;
-      box-shadow: 0 8px 22px rgba(0,0,0,0.05);
+      box-shadow: 0 8px 22px var(--shadow);
       overflow: hidden;
       transition: transform 120ms ease, box-shadow 120ms ease;
     }
     .card:hover {
       transform: translateY(-2px);
-      box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+      box-shadow: 0 12px 28px var(--shadow-hover);
     }
     .thumb {
       position: relative;
       width: 100%;
       padding-top: 56.25%;
       overflow: hidden;
-      background: linear-gradient(135deg, #c3d9ff, #e8f0ff);
+      background: linear-gradient(135deg, var(--thumb-1), var(--thumb-2));
     }
     .thumb img {
       position: absolute;
@@ -41,14 +66,14 @@
     }
     .meta { padding: 12px 14px 14px; }
     .title { font-weight: 600; margin: 0 0 6px; line-height: 1.3; }
-    .id { color: #666; font-size: 12px; word-break: break-all; }
-    .empty { color: #555; }
+    .id { color: var(--muted); font-size: 12px; word-break: break-all; }
+    .empty { color: var(--muted); }
   </style>
 </head>
 <body>
   <div class="topbar">
     <h1 style="margin: 0;">HLS Tube</h1>
-    <a href="/upload" style="font-weight: 600; color: #3943d0;">Upload</a>
+    <a href="/upload" class="accent" style="font-weight: 600;">Upload</a>
   </div>
 
   {% if videos | length == 0 %}

@@ -4,32 +4,83 @@
   <meta charset="utf-8" />
   <title>Upload</title>
   <style>
-    :root { color-scheme: light; }
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    :root {
+      color-scheme: light dark;
+      --bg: #f9fafc;
+      --text: #1f1f1f;
+      --muted: #555;
+      --card: #f7f7ff;
+      --card-strong: #eef0ff;
+      --border: #6c7ae0;
+      --border-strong: #3943d0;
+      --link: #3943d0;
+      --error: #c62828;
+      --input-bg: #ffffff;
+      --input-border: #c9cdd9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1116;
+        --text: #f1f2f4;
+        --muted: #a7adba;
+        --card: #1a1f2d;
+        --card-strong: #21283a;
+        --border: #6a79d6;
+        --border-strong: #8ea2ff;
+        --link: #8ea2ff;
+        --error: #ff8a80;
+        --input-bg: #171b26;
+        --input-border: #2c3448;
+      }
+    }
+    body { font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; background: var(--bg); color: var(--text); }
+    a { color: var(--link); }
     .drop {
       margin-top: 16px;
-      border: 2px dashed #6c7ae0;
+      border: 2px dashed var(--border);
       border-radius: 10px;
       padding: 28px;
       text-align: center;
-      background: #f7f7ff;
+      background: var(--card);
       transition: background 120ms ease, border-color 120ms ease;
       cursor: pointer;
     }
     .drop.dragover {
-      border-color: #3943d0;
-      background: #eef0ff;
+      border-color: var(--border-strong);
+      background: var(--card-strong);
     }
-    .hint { color: #555; margin-top: 12px; }
-    #status { margin-top: 12px; color: #3943d0; }
-    #error { margin-top: 12px; color: #c62828; }
-    input[type="text"] { width: 100%; max-width: 420px; padding: 8px; font-size: 16px; }
+    .hint { color: var(--muted); margin-top: 12px; }
+    #status { margin-top: 12px; color: var(--link); }
+    #error { margin-top: 12px; color: var(--error); }
+    input[type="text"] {
+      width: 100%;
+      max-width: 420px;
+      padding: 8px;
+      font-size: 16px;
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--input-border);
+      border-radius: 6px;
+    }
     .field { margin-top: 12px; }
     .queue { margin-top: 8px; }
     .queue-item { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
-    .queue-name { font-size: 14px; color: #333; min-width: 160px; }
+    .queue-name { font-size: 14px; color: var(--text); min-width: 160px; }
     .queue-item input { flex: 1; }
-    button { margin-top: 16px; padding: 10px 16px; font-size: 15px; }
+    button {
+      margin-top: 16px;
+      padding: 10px 16px;
+      font-size: 15px;
+      background: var(--link);
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
