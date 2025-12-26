@@ -11,3 +11,14 @@ tokio = { version = "1", features = ["process", "macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
