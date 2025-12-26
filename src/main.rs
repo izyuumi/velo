@@ -27,6 +27,9 @@ const STATUS_PROCESSING: &str = "processing";
 const STATUS_READY: &str = "ready";
 const STATUS_ERROR: &str = "error";
 const MAX_LIST_VIDEOS: i64 = 200;
+const PROCESSING_LOCK_STALE_SECS: u64 = 6 * 60 * 60;
+const UPLOAD_SCAN_INTERVAL_SECS: u64 = 10;
+const PROCESSING_DIR_SUFFIX: &str = ".processing";
 
 struct AppState {
     db: SqlitePool,
@@ -48,6 +51,18 @@ fn hls_dir() -> PathBuf {
 
 fn logs_dir() -> PathBuf {
     data_root().join("logs")
+}
+
+fn locks_dir() -> PathBuf {
+    data_root().join("locks")
+}
+
+fn final_hls_dir(id: &str) -> PathBuf {
+    hls_dir().join(id)
+}
+
+fn processing_hls_dir(id: &str) -> PathBuf {
+    hls_dir().join(format!("{id}{PROCESSING_DIR_SUFFIX}"))
 }
 
 fn sqlite_path() -> PathBuf {
@@ -114,6 +129,10 @@ fn ensure_dirs() -> AppResult<()> {
         action: "creating logs directory",
         source: e,
     })?;
+    fs::create_dir_all(locks_dir()).map_err(|e| AppError::Storage {
+        action: "creating locks directory",
+        source: e,
+    })?;
     Ok(())
 }
 
@@ -133,6 +152,9 @@ fn list_videos_from_fs() -> Vec<VideoItem> {
         let Some(id) = dir_path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()) else {
             continue;
         };
+        if id.ends_with(PROCESSING_DIR_SUFFIX) {
+            continue;
+        }
 
         let title_path = dir_path.join("title.txt");
         let title = fs::read_to_string(&title_path)
@@ -291,6 +313,9 @@ async fn sync_db_from_fs(pool: &SqlitePool) -> AppResult<()> {
         let Some(id) = dir_path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
+        if id.ends_with(PROCESSING_DIR_SUFFIX) {
+            continue;
+        }
 
         let master_exists = dir_path.join("master.m3u8").exists();
         if !master_exists {
@@ -418,7 +443,7 @@ async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
         let title: String = row.try_get("title").unwrap_or_else(|_| id.clone());
         let display_title = if title.trim().is_empty() { id.clone() } else { title };
 
-        let dir_path = hls_dir().join(&id);
+        let dir_path = final_hls_dir(&id);
         let master_exists = dir_path.join("master.m3u8").exists();
         if !master_exists {
             let _ = mark_video_error(
@@ -465,8 +490,63 @@ async fn read_video_status(pool: &SqlitePool, id: &str) -> AppResult<Option<(Str
     Ok(None)
 }
 
+async fn list_processing_ids(pool: &SqlitePool) -> AppResult<Vec<String>> {
+    let rows = sqlx::query("SELECT id FROM videos WHERE status = ? ORDER BY created_at ASC")
+        .bind(STATUS_PROCESSING)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "listing processing videos",
+            source: e,
+        })?;
+
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id").unwrap_or_default();
+        if !id.is_empty() {
+            ids.push(id);
+        }
+    }
+
+    Ok(ids)
+}
+
 fn processing_log_path(id: &str) -> PathBuf {
     logs_dir().join(format!("{id}.log"))
+}
+
+fn processing_lock_path(id: &str) -> PathBuf {
+    locks_dir().join(format!("{id}.lock"))
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let age = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    age.as_secs() > PROCESSING_LOCK_STALE_SECS
+}
+
+fn acquire_processing_lock(id: &str) -> bool {
+    let path = processing_lock_path(id);
+    if path.exists() && lock_is_stale(&path) {
+        let _ = fs::remove_file(&path);
+    }
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .is_ok()
+}
+
+fn release_processing_lock(id: &str) {
+    let path = processing_lock_path(id);
+    let _ = fs::remove_file(path);
 }
 
 fn sanitize_log_value(value: &str) -> String {
@@ -610,6 +690,179 @@ async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
+async fn process_video(
+    id: String,
+    upload_path: PathBuf,
+    processing_dir: PathBuf,
+    final_dir: PathBuf,
+    db: SqlitePool,
+) {
+    if let Err(e) = ensure_dirs() {
+        let _ = write_processing_log(&id, "ERROR", &e.user_message(), &e.detail_message());
+        let _ = mark_video_error(&db, &id, &e.user_message(), &e.detail_message()).await;
+        return;
+    }
+
+    if !acquire_processing_lock(&id) {
+        return;
+    }
+
+    if final_dir.join("master.m3u8").exists() {
+        let _ = fs::remove_file(&upload_path);
+        let _ = mark_video_ready(&db, &id).await;
+        release_processing_lock(&id);
+        return;
+    }
+
+    let title_path = processing_dir.join("title.txt");
+    let title = fs::read_to_string(&title_path).ok();
+    if processing_dir.exists() {
+        let _ = fs::remove_dir_all(&processing_dir);
+    }
+    if let Err(e) = fs::create_dir_all(&processing_dir) {
+        let app_error = AppError::Storage {
+            action: "creating processing directory",
+            source: e,
+        };
+        let _ = write_processing_log(&id, "ERROR", &app_error.user_message(), &app_error.detail_message());
+        let _ = mark_video_error(&db, &id, &app_error.user_message(), &app_error.detail_message()).await;
+        release_processing_lock(&id);
+        return;
+    }
+    if let Some(title) = title {
+        let _ = fs::write(processing_dir.join("title.txt"), title);
+    }
+
+    let thumb_result = generate_thumbnail(&upload_path, &processing_dir).await;
+    if let Err(e) = run_ffmpeg_to_hls(&upload_path, &processing_dir).await {
+        let _ = write_processing_log(&id, "ERROR", &e.user_message(), &e.detail_message());
+        let _ = mark_video_error(&db, &id, &e.user_message(), &e.detail_message()).await;
+        let _ = fs::remove_dir_all(&processing_dir);
+        release_processing_lock(&id);
+        return;
+    }
+
+    if final_dir.exists() {
+        let _ = fs::remove_dir_all(&final_dir);
+    }
+    if let Err(e) = fs::rename(&processing_dir, &final_dir) {
+        let app_error = AppError::Storage {
+            action: "finalizing HLS output directory",
+            source: e,
+        };
+        let _ = write_processing_log(&id, "ERROR", &app_error.user_message(), &app_error.detail_message());
+        let _ = mark_video_error(&db, &id, &app_error.user_message(), &app_error.detail_message()).await;
+        let _ = fs::remove_dir_all(&processing_dir);
+        release_processing_lock(&id);
+        return;
+    }
+    let _ = fs::remove_file(&upload_path);
+    let _ = mark_video_ready(&db, &id).await;
+    release_processing_lock(&id);
+
+    if let Err(e) = thumb_result {
+        let _ = write_processing_log(
+            &id,
+            "WARN",
+            "Thumbnail generation failed. The video might be unsupported.",
+            &e.detail_message(),
+        );
+    }
+}
+
+fn spawn_processing_task(id: String, db: SqlitePool) {
+    let upload_path = upload_dir().join(format!("{id}.mp4"));
+    let processing_dir = processing_hls_dir(&id);
+    let final_dir = final_hls_dir(&id);
+    task::spawn(process_video(id, upload_path, processing_dir, final_dir, db));
+}
+
+async fn ensure_video_record(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let title = id.to_string();
+    insert_video(pool, id, &title).await
+}
+
+async fn scan_uploads_for_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> {
+    ensure_dirs()?;
+    let mut ids = Vec::new();
+    let entries = fs::read_dir(upload_dir()).map_err(|e| AppError::Storage {
+        action: "reading upload directory",
+        source: e,
+    })?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("mp4") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let id = stem.to_string();
+        let lock_path = processing_lock_path(&id);
+        if lock_path.exists() {
+            if lock_is_stale(&lock_path) {
+                let _ = fs::remove_file(&lock_path);
+            } else {
+                continue;
+            }
+        }
+        let final_dir = final_hls_dir(&id);
+        let processing_dir = processing_hls_dir(&id);
+        if final_dir.join("master.m3u8").exists() {
+            let _ = fs::remove_file(&path);
+            let _ = mark_video_ready(pool, &id).await;
+            continue;
+        }
+        if processing_dir.exists() {
+            let _ = fs::remove_dir_all(&processing_dir);
+        }
+        let _ = ensure_video_record(pool, &id).await;
+        ids.push(id);
+    }
+
+    Ok(ids)
+}
+
+async fn reconcile_processing_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> {
+    let ids = list_processing_ids(pool).await?;
+    let mut resume_ids = Vec::new();
+    for id in ids {
+        let upload_path = upload_dir().join(format!("{id}.mp4"));
+        let final_dir = final_hls_dir(&id);
+        let processing_dir = processing_hls_dir(&id);
+        let master = final_dir.join("master.m3u8");
+        let lock_path = processing_lock_path(&id);
+        if lock_path.exists() {
+            let _ = fs::remove_file(&lock_path);
+        }
+
+        if master.exists() {
+            let _ = fs::remove_file(&upload_path);
+            let _ = fs::remove_dir_all(&processing_dir);
+            let _ = mark_video_ready(pool, &id).await;
+            continue;
+        }
+
+        if upload_path.exists() {
+            resume_ids.push(id);
+            continue;
+        }
+
+        if processing_dir.exists() {
+            let _ = fs::remove_dir_all(&processing_dir);
+        }
+        let message = "Original upload missing; cannot resume processing.";
+        let _ = write_processing_log(&id, "ERROR", message, "upload file missing");
+        let _ = mark_video_error(pool, &id, message, "upload file missing").await;
+    }
+
+    Ok(resume_ids)
+}
+
 #[get("/")]
 async fn index(state: &State<AppState>) -> Template {
     let videos = match list_videos(&state.db).await {
@@ -635,7 +888,7 @@ async fn upload_post(
     let title = form.title.unwrap_or("").trim().to_string();
 
     let upload_path = upload_dir().join(format!("{id}.mp4"));
-    let out_dir = hls_dir().join(&id);
+    let out_dir = processing_hls_dir(&id);
 
     fs::create_dir_all(&out_dir).map_err(|e| {
         to_api_error(AppError::Storage {
@@ -670,30 +923,7 @@ async fn upload_post(
     insert_video(&state.db, &id, &title_for_db).await.map_err(to_api_error)?;
 
     // Spawn background processing so the request returns immediately.
-    let upload_path_bg = upload_path.clone();
-    let out_dir_bg = out_dir.clone();
-    let id_bg = id.clone();
-    let db_bg = state.db.clone();
-    task::spawn(async move {
-        let thumb_result = generate_thumbnail(&upload_path_bg, &out_dir_bg).await;
-        if let Err(e) = run_ffmpeg_to_hls(&upload_path_bg, &out_dir_bg).await {
-            let _ = write_processing_log(&id_bg, "ERROR", &e.user_message(), &e.detail_message());
-            let _ = mark_video_error(&db_bg, &id_bg, &e.user_message(), &e.detail_message()).await;
-        } else {
-            // Clean up original upload after successful packaging to save space.
-            let _ = fs::remove_file(&upload_path_bg);
-            let _ = mark_video_ready(&db_bg, &id_bg).await;
-        }
-
-        if let Err(e) = thumb_result {
-            let _ = write_processing_log(
-                &id_bg,
-                "WARN",
-                "Thumbnail generation failed. The video might be unsupported.",
-                &e.detail_message(),
-            );
-        }
-    });
+    spawn_processing_task(id.clone(), state.db.clone());
 
     Ok(Json(UploadResult {
         id: id.clone(),
@@ -705,7 +935,7 @@ async fn upload_post(
 #[get("/watch/<id>")]
 async fn watch(state: &State<AppState>, id: &str) -> Template {
     let id_owned = id.to_string();
-    let out_dir = hls_dir().join(id);
+    let out_dir = final_hls_dir(id);
     let master = out_dir.join("master.m3u8");
 
     let ready = master.exists();
@@ -771,6 +1001,39 @@ fn rocket() -> _ {
         .attach(AdHoc::on_ignite("SQLite", |rocket| async {
             let db = init_db().await.expect("failed to initialize sqlite");
             rocket.manage(AppState { db })
+        }))
+        .attach(AdHoc::on_liftoff("ResumeProcessing", |rocket| {
+            Box::pin(async move {
+                let Some(state) = rocket.state::<AppState>() else {
+                    return;
+                };
+
+                if let Ok(ids) = reconcile_processing_jobs(&state.db).await {
+                    for id in ids {
+                        spawn_processing_task(id, state.db.clone());
+                    }
+                }
+            })
+        }))
+        .attach(AdHoc::on_liftoff("WatchUploads", |rocket| {
+            Box::pin(async move {
+                let Some(state) = rocket.state::<AppState>() else {
+                    return;
+                };
+
+                let pool = state.db.clone();
+                task::spawn(async move {
+                    let mut ticker = rocket::tokio::time::interval(Duration::from_secs(UPLOAD_SCAN_INTERVAL_SECS));
+                    loop {
+                        ticker.tick().await;
+                        if let Ok(ids) = scan_uploads_for_jobs(&pool).await {
+                            for id in ids {
+                                spawn_processing_task(id, pool.clone());
+                            }
+                        }
+                    }
+                });
+            })
         }))
         .register("/", catchers![not_found, payload_too_large, server_error])
 }
