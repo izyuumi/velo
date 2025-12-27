@@ -447,8 +447,7 @@ async fn upsert_ready_video(pool: &SqlitePool, id: &str, title: &str, created_at
         "INSERT INTO videos (id, title, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE
-         SET title=excluded.title,
-             status=excluded.status,
+         SET status=excluded.status,
              updated_at=excluded.updated_at,
              progress=100,
              created_at=MIN(videos.created_at, excluded.created_at)",
@@ -512,8 +511,7 @@ async fn insert_video(pool: &SqlitePool, id: &str, title: &str) -> AppResult<()>
         "INSERT INTO videos (id, title, status, created_at, updated_at, progress)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE
-         SET title=excluded.title,
-             status=excluded.status,
+         SET status=excluded.status,
              updated_at=excluded.updated_at,
              error_message=NULL,
              error_detail=NULL,
