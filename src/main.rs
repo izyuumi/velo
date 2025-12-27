@@ -1704,6 +1704,30 @@ fn rocket() -> _ {
                 });
             })
         }))
+        .attach(AdHoc::on_liftoff("DevFrontend", |_rocket| {
+            Box::pin(async move {
+                let frontend_dir = PathBuf::from("frontend");
+
+                task::spawn(async move {
+                    let result = Command::new("npm")
+                        .arg("run")
+                        .arg("dev")
+                        .current_dir(&frontend_dir)
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn();
+
+                    match result {
+                        Ok(mut child) => {
+                            let _ = child.wait().await;
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to start frontend dev server: {e}");
+                        }
+                    }
+                });
+            })
+        }))
         .register("/", catchers![not_found, payload_too_large, server_error])
 }
 

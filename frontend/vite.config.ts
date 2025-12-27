@@ -11,6 +11,7 @@ export default defineConfig({
     },
   },
   server: {
+    port: 35774,
     proxy: {
       "/api": "http://127.0.0.1:35773",
       "/upload": "http://127.0.0.1:35773",
