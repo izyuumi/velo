@@ -64,9 +64,26 @@
     }
     .field { margin-top: 12px; }
     .queue { margin-top: 8px; }
-    .queue-item { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
-    .queue-name { font-size: 14px; color: var(--text); min-width: 160px; }
-    .queue-item input { flex: 1; }
+    .queue-item { display: grid; grid-template-columns: 160px 1fr; gap: 8px 12px; align-items: center; margin-top: 12px; }
+    .queue-name { font-size: 14px; color: var(--text); min-width: 160px; word-break: break-word; }
+    .queue-item input { width: 100%; }
+    .queue-status { grid-column: 1 / -1; font-size: 13px; color: var(--muted); display: flex; gap: 12px; }
+    .progress {
+      grid-column: 1 / -1;
+      height: 8px;
+      background: rgba(0,0,0,0.08);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--link);
+      transition: width 120ms ease;
+    }
+    .progress.processing .progress-fill {
+      background: var(--border-strong);
+    }
     button {
       margin-top: 16px;
       padding: 10px 16px;
@@ -132,49 +149,79 @@
 
     drop.addEventListener('drop', (e) => {
       const files = e.dataTransfer.files;
-      if (files?.length) addFiles(files);
+      if (files?.length) {
+        addFiles(files);
+        startUpload();
+      }
     });
 
     fileInput.addEventListener('change', () => {
       const files = fileInput.files;
-      if (files?.length) addFiles(files);
+      if (files?.length) {
+        addFiles(files);
+        startUpload();
+      }
       fileInput.value = '';
     });
 
     let uploading = false;
-    const files = [];
+    const queue = [];
 
     function addFiles(fileList) {
       for (const file of Array.from(fileList)) {
-        files.push(file);
+        queue.push({ file });
       }
       renderQueue();
     }
 
     function renderQueue() {
       queueEl.textContent = '';
-      if (!files.length) {
+      if (!queue.length) {
         queueEl.textContent = 'Add files to set titles.';
         uploadBtn.disabled = true;
         return;
       }
-      files.forEach((file, idx) => {
+      queue.forEach((item, idx) => {
         const row = document.createElement('div');
         row.className = 'queue-item';
 
         const name = document.createElement('div');
         name.className = 'queue-name';
-        name.textContent = file.name;
+        name.textContent = item.file.name;
 
         const input = document.createElement('input');
         input.type = 'text';
         input.placeholder = 'Optional title';
         input.dataset.idx = String(idx);
-        input.value = file.name;
+        input.value = item.file.name;
+
+        const status = document.createElement('div');
+        status.className = 'queue-status';
+        status.textContent = 'Queued';
+
+        const uploadBar = document.createElement('div');
+        uploadBar.className = 'progress';
+        const uploadFill = document.createElement('div');
+        uploadFill.className = 'progress-fill';
+        uploadBar.appendChild(uploadFill);
+
+        const processingBar = document.createElement('div');
+        processingBar.className = 'progress processing';
+        const processingFill = document.createElement('div');
+        processingFill.className = 'progress-fill';
+        processingBar.appendChild(processingFill);
 
         row.appendChild(name);
         row.appendChild(input);
+        row.appendChild(status);
+        row.appendChild(uploadBar);
+        row.appendChild(processingBar);
         queueEl.appendChild(row);
+
+        item.input = input;
+        item.status = status;
+        item.uploadFill = uploadFill;
+        item.processingFill = processingFill;
       });
       uploadBtn.disabled = false;
     }
@@ -191,53 +238,39 @@
 
     async function readErrorMessage(resp) {
       try {
-        const data = await resp.json();
-        if (data && data.message) return data.message;
+        if (resp && typeof resp.json === 'function') {
+          const data = await resp.json();
+          if (data && data.message) return data.message;
+          const text = await resp.text();
+          return text || `Upload failed (${resp.status})`;
+        }
+        if (resp && resp.responseText) {
+          const data = JSON.parse(resp.responseText);
+          if (data && data.message) return data.message;
+          return resp.responseText || `Upload failed (${resp.status})`;
+        }
       } catch (err) {
         // Ignore JSON parsing errors and fall back to text.
       }
-      const text = await resp.text();
-      return text || `Upload failed (${resp.status})`;
+      return `Upload failed (${resp.status || 'unknown'})`;
     }
 
     async function startUpload() {
-      if (!files.length || uploading) return;
+      if (!queue.length || uploading) return;
       uploading = true;
       setError('');
-      setStatus(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`);
+      setStatus(`Uploading ${queue.length} file${queue.length === 1 ? '' : 's'}…`);
       resultsEl.textContent = '';
       setBusy(true);
 
-      const titles = Array.from(queueEl.querySelectorAll('input[data-idx]'))
-        .map(input => input.value.trim());
-
       try {
-        for (let idx = 0; idx < files.length; idx += 1) {
-          const file = files[idx];
-          const title = titles[idx] || file.name;
-          const form = new FormData();
-          form.append('video', file);
-          form.append('title', title);
-
-          const resp = await fetch('/upload', { method: 'POST', body: form });
-          if (!resp.ok) {
-            const message = await readErrorMessage(resp);
-            throw new Error(message);
-          }
-          const item = await resp.json();
-          if (files.length === 1 && item.watch_url) {
-            window.location.href = item.watch_url;
-            return;
-          }
-          const row = document.createElement('li');
-          const link = document.createElement('a');
-          link.href = item.watch_url || '/';
-          link.textContent = item.title || file.name || 'View upload';
-          row.appendChild(link);
-          resultsEl.appendChild(row);
+        for (let idx = 0; idx < queue.length; idx += 1) {
+          const item = queue[idx];
+          const title = item.input.value.trim() || item.file.name;
+          await uploadSingle(item, title);
         }
         setStatus('All uploads finished.');
-        files.length = 0;
+        queue.length = 0;
         renderQueue();
       } catch (err) {
         setStatus('');
@@ -246,6 +279,71 @@
         uploading = false;
         setBusy(false);
       }
+    }
+
+    async function uploadSingle(item, title) {
+      item.status.textContent = 'Uploading…';
+      item.uploadFill.style.width = '0%';
+      item.processingFill.style.width = '0%';
+
+      const form = new FormData();
+      form.append('video', item.file);
+      form.append('title', title);
+
+      const resp = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload');
+        xhr.upload.addEventListener('progress', (evt) => {
+          if (evt.lengthComputable) {
+            const pct = Math.round((evt.loaded / evt.total) * 100);
+            item.uploadFill.style.width = `${pct}%`;
+          }
+        });
+        xhr.onload = () => resolve(xhr);
+        xhr.onerror = () => reject(new Error('Upload failed.'));
+        xhr.send(form);
+      });
+
+      if (resp.status < 200 || resp.status >= 300) {
+        const message = await readErrorMessage(resp);
+        throw new Error(message);
+      }
+
+      const data = JSON.parse(resp.responseText);
+      item.status.textContent = 'Processing…';
+      pollStatus(item, data.id);
+
+      const row = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = data.watch_url || '/';
+      link.textContent = data.title || item.file.name || 'View upload';
+      row.appendChild(link);
+      resultsEl.appendChild(row);
+    }
+
+    async function pollStatus(item, id) {
+      const maxAttempts = 120;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const resp = await fetch(`/api/status/${id}`);
+        if (resp.ok) {
+          const status = await resp.json();
+          if (status.status === 'ready') {
+            item.status.textContent = 'Ready';
+            item.processingFill.style.width = '100%';
+            return;
+          }
+          if (status.status === 'error') {
+            item.status.textContent = `Error: ${status.error || 'Processing failed'}`;
+            return;
+          }
+          if (typeof status.progress === 'number') {
+            const pct = Math.max(0, Math.min(99, Math.round(status.progress)));
+            item.processingFill.style.width = `${pct}%`;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      item.status.textContent = 'Still processing. Check the watch page.';
     }
 
     uploadBtn.addEventListener('click', startUpload);

@@ -32,5 +32,6 @@
 - Upload size is bounded by `Rocket.toml` limits; adjust if needed for larger assets.
 
 ## Operational Notes
-- Upload flow: request returns immediately; background task writes `hls/<id>/master.m3u8` and `error.txt` on failure, then deletes original upload on success.
-- Watch page polls only via manual refresh; add client polling if near-real-time readiness is required.
+- Upload flow: request returns immediately; background task writes `hls/<id>/master.m3u8` and `error.txt` on failure.
+- Watch page now auto-polls for readiness; upload page shows per-file progress and processing status.
+- Uploads are retained by default; original MP4s stay in `data/uploads` after processing.

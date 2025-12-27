@@ -13,13 +13,17 @@ use rocket::tokio::process::Command;
 use rocket::tokio::task;
 use rocket::State;
 use rocket_dyn_templates::{context, Template};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::{env, fs};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 use crate::error::{AppError, AppResult, ApiError, to_api_error};
 
@@ -30,9 +34,35 @@ const MAX_LIST_VIDEOS: i64 = 200;
 const PROCESSING_LOCK_STALE_SECS: u64 = 6 * 60 * 60;
 const UPLOAD_SCAN_INTERVAL_SECS: u64 = 10;
 const PROCESSING_DIR_SUFFIX: &str = ".processing";
+const DEFAULT_MAX_RETRIES: i64 = 2;
+const DEFAULT_RETRY_DELAY_SECS: u64 = 30;
+const PROGRESS_UPDATE_INTERVAL_MS: u64 = 500;
 
 struct AppState {
     db: SqlitePool,
+    hls: HlsSettings,
+    retry: RetrySettings,
+}
+
+#[derive(Clone)]
+struct HlsVariant {
+    width: i64,
+    bitrate_k: i64,
+}
+
+#[derive(Clone)]
+struct HlsSettings {
+    segment_seconds: u32,
+    crf: u8,
+    preset: String,
+    audio_bitrate_k: i64,
+    variants: Vec<HlsVariant>,
+}
+
+#[derive(Clone, Copy)]
+struct RetrySettings {
+    max_retries: i64,
+    delay_secs: u64,
 }
 
 fn data_root() -> PathBuf {
@@ -71,6 +101,68 @@ fn sqlite_path() -> PathBuf {
         .unwrap_or_else(|_| data_root().join("app.db"))
 }
 
+fn hls_settings() -> HlsSettings {
+    let segment_seconds = env::var("HLS_SEGMENT_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(4);
+    let crf = env::var("HLS_CRF")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(23);
+    let preset = env::var("HLS_PRESET").unwrap_or_else(|_| "veryfast".to_string());
+    let audio_bitrate_k = env::var("HLS_AUDIO_BITRATE_K")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(128);
+    let variants = env::var("HLS_VARIANTS")
+        .ok()
+        .map(|v| parse_variants(&v))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                HlsVariant { width: 1920, bitrate_k: 5000 },
+                HlsVariant { width: 1280, bitrate_k: 2800 },
+                HlsVariant { width: 854, bitrate_k: 1400 },
+            ]
+        });
+
+    HlsSettings {
+        segment_seconds,
+        crf,
+        preset,
+        audio_bitrate_k,
+        variants,
+    }
+}
+
+fn parse_variants(value: &str) -> Vec<HlsVariant> {
+    value
+        .split(',')
+        .filter_map(|pair| {
+            let mut parts = pair.split(':');
+            let width = parts.next()?.trim().parse::<i64>().ok()?;
+            let bitrate_k = parts.next()?.trim().parse::<i64>().ok()?;
+            Some(HlsVariant { width, bitrate_k })
+        })
+        .collect()
+}
+
+fn retry_settings() -> RetrySettings {
+    let max_retries = env::var("PROCESSING_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_MAX_RETRIES);
+    let delay_secs = env::var("PROCESSING_RETRY_DELAY_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RETRY_DELAY_SECS);
+    RetrySettings {
+        max_retries,
+        delay_secs,
+    }
+}
+
 fn system_time_to_unix(ts: SystemTime) -> i64 {
     ts.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -91,7 +183,14 @@ struct UploadForm<'r> {
 struct VideoItem {
     id: String,
     title: String,
+    status: String,
+    progress: Option<f64>,
+    error: Option<String>,
     thumbnail: Option<String>,
+    duration_seconds: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    created_at: i64,
 }
 
 #[derive(Serialize)]
@@ -99,6 +198,13 @@ struct WatchContext {
     id: String,
     ready: bool,
     error: Option<String>,
+    title: String,
+    duration_seconds: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    created_at: i64,
+    retries: i64,
+    upload_available: bool,
 }
 
 #[derive(Serialize)]
@@ -106,6 +212,27 @@ struct UploadResult {
     id: String,
     title: String,
     watch_url: String,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    id: String,
+    status: String,
+    progress: Option<f64>,
+    error: Option<String>,
+    title: String,
+    watch_url: String,
+    duration_seconds: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    created_at: i64,
+    retries: i64,
+    upload_available: bool,
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    title: String,
 }
 
 fn ensure_dirs() -> AppResult<()> {
@@ -156,21 +283,32 @@ fn list_videos_from_fs() -> Vec<VideoItem> {
             continue;
         }
 
-        let title_path = dir_path.join("title.txt");
-        let title = fs::read_to_string(&title_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| id.clone());
+        let title = id.clone();
 
         let master_exists = dir_path.join("master.m3u8").exists();
         if master_exists {
+            let created_at = fs::metadata(&dir_path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .map(system_time_to_unix)
+                .unwrap_or_else(unix_ts);
             let thumb_url = dir_path
                 .join("thumb.jpg")
                 .exists()
                 .then(|| format!("/hls/{id}/thumb.jpg"));
 
-            items.push(VideoItem { id, title, thumbnail: thumb_url });
+            items.push(VideoItem {
+                id,
+                title,
+                status: STATUS_READY.to_string(),
+                progress: Some(100.0),
+                error: None,
+                thumbnail: thumb_url,
+                duration_seconds: None,
+                width: None,
+                height: None,
+                created_at,
+            });
         }
     }
 
@@ -269,6 +407,51 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
             })?;
     }
 
+    if current_version < 2 {
+        sqlx::query("ALTER TABLE videos ADD COLUMN duration_seconds INTEGER")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding duration_seconds column",
+                source: e,
+            })?;
+        sqlx::query("ALTER TABLE videos ADD COLUMN width INTEGER")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding width column",
+                source: e,
+            })?;
+        sqlx::query("ALTER TABLE videos ADD COLUMN height INTEGER")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding height column",
+                source: e,
+            })?;
+        sqlx::query("ALTER TABLE videos ADD COLUMN progress REAL")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding progress column",
+                source: e,
+            })?;
+        sqlx::query("ALTER TABLE videos ADD COLUMN retries INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding retries column",
+                source: e,
+            })?;
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES (2)")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "recording schema migration",
+                source: e,
+            })?;
+    }
+
     Ok(())
 }
 
@@ -281,6 +464,7 @@ async fn upsert_ready_video(pool: &SqlitePool, id: &str, title: &str, created_at
          SET title=excluded.title,
              status=excluded.status,
              updated_at=excluded.updated_at,
+             progress=100,
              created_at=MIN(videos.created_at, excluded.created_at)",
     )
     .bind(id)
@@ -322,12 +506,7 @@ async fn sync_db_from_fs(pool: &SqlitePool) -> AppResult<()> {
             continue;
         }
 
-        let title_path = dir_path.join("title.txt");
-        let title = fs::read_to_string(&title_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| id.to_string());
+        let title = id.to_string();
 
         let created_at = fs::metadata(&dir_path)
             .ok()
@@ -344,20 +523,22 @@ async fn sync_db_from_fs(pool: &SqlitePool) -> AppResult<()> {
 async fn insert_video(pool: &SqlitePool, id: &str, title: &str) -> AppResult<()> {
     let now = unix_ts();
     sqlx::query(
-        "INSERT INTO videos (id, title, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO videos (id, title, status, created_at, updated_at, progress)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE
          SET title=excluded.title,
              status=excluded.status,
              updated_at=excluded.updated_at,
              error_message=NULL,
-             error_detail=NULL",
+             error_detail=NULL,
+             progress=excluded.progress",
     )
     .bind(id)
     .bind(title)
     .bind(STATUS_PROCESSING)
     .bind(now)
     .bind(now)
+    .bind(0.0_f64)
     .execute(pool)
     .await
     .map_err(|e| AppError::Database {
@@ -374,6 +555,7 @@ async fn mark_video_ready(pool: &SqlitePool, id: &str) -> AppResult<()> {
         "UPDATE videos
          SET status = ?,
              updated_at = ?,
+             progress = 100,
              error_message = NULL,
              error_detail = NULL
          WHERE id = ?",
@@ -416,15 +598,128 @@ async fn mark_video_error(pool: &SqlitePool, id: &str, message: &str, detail: &s
     Ok(())
 }
 
+async fn update_video_progress(pool: &SqlitePool, id: &str, progress: f64) -> AppResult<()> {
+    let now = unix_ts();
+    sqlx::query(
+        "UPDATE videos
+         SET progress = ?,
+             updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(progress)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "updating video progress",
+        source: e,
+    })?;
+    Ok(())
+}
+
+async fn update_video_metadata(
+    pool: &SqlitePool,
+    id: &str,
+    duration_seconds: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+) -> AppResult<()> {
+    let now = unix_ts();
+    sqlx::query(
+        "UPDATE videos
+         SET duration_seconds = COALESCE(?, duration_seconds),
+             width = COALESCE(?, width),
+             height = COALESCE(?, height),
+             updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(duration_seconds)
+    .bind(width)
+    .bind(height)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "updating video metadata",
+        source: e,
+    })?;
+    Ok(())
+}
+
+async fn update_video_title(pool: &SqlitePool, id: &str, title: &str) -> AppResult<()> {
+    let now = unix_ts();
+    sqlx::query(
+        "UPDATE videos
+         SET title = ?,
+             updated_at = ?,
+             error_message = NULL
+         WHERE id = ?",
+    )
+    .bind(title)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "renaming video",
+        source: e,
+    })?;
+    Ok(())
+}
+
+async fn bump_retry_count(pool: &SqlitePool, id: &str) -> AppResult<i64> {
+    sqlx::query("UPDATE videos SET retries = retries + 1 WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "incrementing retry count",
+            source: e,
+        })?;
+
+    let retries: i64 = sqlx::query_scalar("SELECT retries FROM videos WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "reading retry count",
+            source: e,
+        })?;
+    Ok(retries)
+}
+
+async fn reset_for_reprocess(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let now = unix_ts();
+    sqlx::query(
+        "UPDATE videos
+         SET status = ?,
+             progress = 0,
+             updated_at = ?,
+             error_message = NULL,
+             error_detail = NULL
+         WHERE id = ?",
+    )
+    .bind(STATUS_PROCESSING)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "resetting video for reprocess",
+        source: e,
+    })?;
+    Ok(())
+}
+
 async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
     let rows = sqlx::query(
-        "SELECT id, title
+        "SELECT id, title, status, error_message, progress, duration_seconds, width, height, created_at
          FROM videos
-         WHERE status = ?
          ORDER BY created_at DESC
          LIMIT ?",
     )
-    .bind(STATUS_READY)
     .bind(MAX_LIST_VIDEOS)
     .fetch_all(pool)
     .await
@@ -441,53 +736,101 @@ async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
         }
 
         let title: String = row.try_get("title").unwrap_or_else(|_| id.clone());
+        let status: String = row.try_get("status").unwrap_or_else(|_| STATUS_PROCESSING.to_string());
+        let error: Option<String> = row.try_get("error_message").ok();
+        let progress: Option<f64> = row.try_get("progress").ok();
+        let duration_seconds: Option<i64> = row.try_get("duration_seconds").ok();
+        let width: Option<i64> = row.try_get("width").ok();
+        let height: Option<i64> = row.try_get("height").ok();
+        let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
         let display_title = if title.trim().is_empty() { id.clone() } else { title };
 
-        let dir_path = final_hls_dir(&id);
-        let master_exists = dir_path.join("master.m3u8").exists();
-        if !master_exists {
-            let _ = mark_video_error(
-                pool,
-                &id,
-                "Video package missing on disk.",
-                "HLS output is missing master.m3u8.",
-            )
-            .await;
-            continue;
-        }
+        let mut status = status;
+        let mut error = error;
+        let mut thumb_url = None;
 
-        let thumb_url = dir_path
-            .join("thumb.jpg")
-            .exists()
-            .then(|| format!("/hls/{id}/thumb.jpg"));
+        if status == STATUS_READY {
+            let dir_path = final_hls_dir(&id);
+            let master_exists = dir_path.join("master.m3u8").exists();
+            if !master_exists {
+                let _ = mark_video_error(
+                    pool,
+                    &id,
+                    "Video package missing on disk.",
+                    "HLS output is missing master.m3u8.",
+                )
+                .await;
+                status = STATUS_ERROR.to_string();
+                error = Some("Video package missing on disk.".to_string());
+            } else {
+                thumb_url = dir_path
+                    .join("thumb.jpg")
+                    .exists()
+                    .then(|| format!("/hls/{id}/thumb.jpg"));
+            }
+        }
 
         items.push(VideoItem {
             id,
             title: display_title,
+            status,
+            progress,
+            error,
             thumbnail: thumb_url,
+            duration_seconds,
+            width,
+            height,
+            created_at,
         });
     }
 
     Ok(items)
 }
 
-async fn read_video_status(pool: &SqlitePool, id: &str) -> AppResult<Option<(String, Option<String>)>> {
-    let row = sqlx::query("SELECT status, error_message FROM videos WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| AppError::Database {
-            action: "reading video status",
-            source: e,
-        })?;
+async fn read_video_status_full(pool: &SqlitePool, id: &str) -> AppResult<Option<StatusResponse>> {
+    let row = sqlx::query(
+        "SELECT id, title, status, error_message, progress, duration_seconds, width, height, created_at, retries
+         FROM videos
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "reading full video status",
+        source: e,
+    })?;
 
-    if let Some(row) = row {
-        let status: String = row.try_get("status").unwrap_or_default();
-        let error_message: Option<String> = row.try_get("error_message").ok();
-        return Ok(Some((status, error_message)));
-    }
+    let Some(row) = row else {
+        return Ok(None);
+    };
 
-    Ok(None)
+    let id: String = row.try_get("id").unwrap_or_default();
+    let title: String = row.try_get("title").unwrap_or_else(|_| id.clone());
+    let status: String = row.try_get("status").unwrap_or_else(|_| STATUS_PROCESSING.to_string());
+    let error: Option<String> = row.try_get("error_message").ok();
+    let progress: Option<f64> = row.try_get("progress").ok();
+    let duration_seconds: Option<i64> = row.try_get("duration_seconds").ok();
+    let width: Option<i64> = row.try_get("width").ok();
+    let height: Option<i64> = row.try_get("height").ok();
+    let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+    let retries: i64 = row.try_get("retries").unwrap_or_default();
+
+    let upload_available = upload_dir().join(format!("{id}.mp4")).exists();
+    Ok(Some(StatusResponse {
+        id: id.clone(),
+        status,
+        progress,
+        error,
+        title,
+        watch_url: format!("/watch/{id}"),
+        duration_seconds,
+        width,
+        height,
+        created_at,
+        retries,
+        upload_available,
+    }))
 }
 
 async fn list_processing_ids(pool: &SqlitePool) -> AppResult<Vec<String>> {
@@ -509,6 +852,18 @@ async fn list_processing_ids(pool: &SqlitePool) -> AppResult<Vec<String>> {
     }
 
     Ok(ids)
+}
+
+async fn delete_video_record(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM videos WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "deleting video record",
+            source: e,
+        })?;
+    Ok(())
 }
 
 fn processing_log_path(id: &str) -> PathBuf {
@@ -587,6 +942,91 @@ fn read_processing_error(id: &str) -> Option<String> {
     None
 }
 
+struct MediaMetadata {
+    duration_seconds: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    has_audio: bool,
+}
+
+async fn probe_video_metadata(input_mp4: &Path) -> AppResult<MediaMetadata> {
+    if env::var("FFMPEG_DRY_RUN").ok().as_deref() == Some("1") {
+        return Ok(MediaMetadata {
+            duration_seconds: None,
+            width: None,
+            height: None,
+            has_audio: true,
+        });
+    }
+
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=width,height")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("json")
+        .arg(input_mp4)
+        .output()
+        .await
+        .map_err(|e| AppError::Ffmpeg {
+            message: format!("ffprobe spawn failed: {e}"),
+        })?;
+
+    if !output.status.success() {
+        return Err(AppError::Ffmpeg {
+            message: format!("ffprobe exited with status: {}", output.status),
+        });
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|e| AppError::Ffmpeg {
+        message: format!("ffprobe output parse failed: {e}"),
+    })?;
+
+    let duration_seconds = value
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|d| d.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|d| d.round() as i64);
+
+    let (width, height) = value
+        .get("streams")
+        .and_then(|s| s.as_array())
+        .and_then(|arr| arr.get(0))
+        .map(|stream| {
+            let width = stream.get("width").and_then(|v| v.as_i64());
+            let height = stream.get("height").and_then(|v| v.as_i64());
+            (width, height)
+        })
+        .unwrap_or((None, None));
+
+    let has_audio = value
+        .get("streams")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().any(|stream| {
+                stream
+                    .get("codec_type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "audio")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    Ok(MediaMetadata {
+        duration_seconds,
+        width,
+        height,
+        has_audio,
+    })
+}
+
 #[get("/static/vendor/hls.min.js")]
 async fn hls_js() -> Option<(ContentType, NamedFile)> {
     let path = Path::new("static/vendor/hls.min.js");
@@ -605,23 +1045,84 @@ async fn hls_js_map() -> Option<(ContentType, NamedFile)> {
         .map(|file| (ContentType::JSON, file))
 }
 
-async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
-    let master = out_dir.join("master.m3u8");
-    let segment_pattern = out_dir.join("seg_%03d.ts");
+async fn run_ffmpeg_to_hls(
+    input_mp4: &Path,
+    out_dir: &Path,
+    settings: &HlsSettings,
+    metadata: &MediaMetadata,
+    db: &SqlitePool,
+    id: &str,
+) -> AppResult<()> {
+    if env::var("FFMPEG_DRY_RUN").ok().as_deref() == Some("1") {
+        let master = out_dir.join("master.m3u8");
+        let _ = fs::write(&master, "#EXTM3U\n#EXT-X-VERSION:3\n");
+        update_video_progress(db, id, 100.0).await?;
+        return Ok(());
+    }
+
+    let master = "master.m3u8";
+    let segment_pattern = "v%v/seg_%03d.ts";
+    let playlist_pattern = "v%v/prog_index.m3u8";
+
+    for (idx, _variant) in settings.variants.iter().enumerate() {
+        let variant_dir = out_dir.join(format!("v{idx}"));
+        let _ = fs::create_dir_all(&variant_dir);
+    }
+
+    let input_abs = fs::canonicalize(input_mp4).map_err(|e| AppError::Storage {
+        action: "canonicalizing upload path",
+        source: e,
+    })?;
 
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-nostats")
+        .arg("-progress")
+        .arg("pipe:1")
         .arg("-i")
-        .arg(input_mp4)
-        .arg("-c:v")
+        .arg(input_abs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(out_dir);
+
+    let mut filter = String::new();
+    if settings.variants.len() > 1 {
+        filter.push_str(&format!("[0:v]split={}", settings.variants.len()));
+        for idx in 0..settings.variants.len() {
+            filter.push_str(&format!("[v{idx}]"));
+        }
+        filter.push(';');
+        for (idx, variant) in settings.variants.iter().enumerate() {
+            filter.push_str(&format!(
+                "[v{idx}]scale={}:-2[v{idx}out];",
+                variant.width
+            ));
+        }
+        filter.pop();
+        cmd.arg("-filter_complex").arg(filter);
+        for idx in 0..settings.variants.len() {
+            cmd.arg("-map").arg(format!("[v{idx}out]"));
+            if metadata.has_audio {
+                cmd.arg("-map").arg("0:a:0");
+            }
+        }
+    } else if let Some(variant) = settings.variants.first() {
+        cmd.arg("-vf").arg(format!("scale={}:-2", variant.width));
+        cmd.arg("-map").arg("0:v:0");
+        if metadata.has_audio {
+            cmd.arg("-map").arg("0:a:0");
+        }
+    }
+
+    cmd.arg("-c:v")
         .arg("libx264")
         .arg("-preset")
-        .arg("veryfast")
+        .arg(&settings.preset)
         .arg("-crf")
-        .arg("23")
+        .arg(settings.crf.to_string())
         .arg("-profile:v")
         .arg("main")
         .arg("-pix_fmt")
@@ -629,36 +1130,100 @@ async fn run_ffmpeg_to_hls(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
         .arg("-c:a")
         .arg("aac")
         .arg("-b:a")
-        .arg("128k")
-        .arg("-f")
+        .arg(format!("{}k", settings.audio_bitrate_k));
+
+    for (idx, variant) in settings.variants.iter().enumerate() {
+        cmd.arg(format!("-b:v:{idx}"))
+            .arg(format!("{}k", variant.bitrate_k));
+    }
+
+    let var_map: String = if metadata.has_audio {
+        (0..settings.variants.len())
+            .map(|idx| format!("v:{},a:{}", idx * 2, idx * 2 + 1))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        (0..settings.variants.len())
+            .map(|idx| format!("v:{idx}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    cmd.arg("-f")
         .arg("hls")
         .arg("-hls_time")
-        .arg("4")
+        .arg(settings.segment_seconds.to_string())
         .arg("-hls_playlist_type")
         .arg("vod")
         .arg("-hls_flags")
         .arg("independent_segments")
         .arg("-hls_segment_filename")
         .arg(segment_pattern)
-        .arg(master);
+        .arg("-master_pl_name")
+        .arg(master)
+        .arg("-var_stream_map")
+        .arg(var_map)
+        .arg(playlist_pattern);
 
-    let status = cmd
-        .status()
-        .await
-        .map_err(|e| AppError::Ffmpeg {
-            message: format!("ffmpeg spawn failed: {e}"),
-        })?;
+    let mut child = cmd.spawn().map_err(|e| AppError::Ffmpeg {
+        message: format!("ffmpeg spawn failed: {e}"),
+    })?;
 
+    let stdout = child.stdout.take().ok_or_else(|| AppError::Ffmpeg {
+        message: "ffmpeg stdout missing".to_string(),
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| AppError::Ffmpeg {
+        message: "ffmpeg stderr missing".to_string(),
+    })?;
+    let stderr_task = task::spawn(async move {
+        let mut buf = Vec::new();
+        let mut reader = BufReader::new(stderr);
+        reader
+            .read_to_end(&mut buf)
+            .await
+            .map(|_| String::from_utf8_lossy(&buf).to_string())
+    });
+    let mut reader = BufReader::new(stdout).lines();
+    let mut last_update = Instant::now();
+    let total_ms = metadata.duration_seconds.map(|d| d.saturating_mul(1000) as f64);
+
+    while let Some(line) = reader.next_line().await.map_err(|e| AppError::Ffmpeg {
+        message: format!("ffmpeg progress read failed: {e}"),
+    })? {
+        if let Some(value) = line.strip_prefix("out_time_ms=") {
+            if let Ok(out_ms) = value.trim().parse::<f64>() {
+                if let Some(total) = total_ms {
+                    let pct = ((out_ms / total) * 100.0).clamp(0.0, 99.9);
+                    if last_update.elapsed().as_millis() as u64 >= PROGRESS_UPDATE_INTERVAL_MS {
+                        let _ = update_video_progress(db, id, pct).await;
+                        last_update = Instant::now();
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| AppError::Ffmpeg {
+        message: format!("ffmpeg wait failed: {e}"),
+    })?;
+    let stderr_output = stderr_task.await.unwrap_or_else(|_| Ok(String::new())).unwrap_or_default();
     if !status.success() {
         return Err(AppError::Ffmpeg {
-            message: format!("ffmpeg exited with status: {status}"),
+            message: format!("ffmpeg exited with status: {status}. {stderr_output}"),
         });
     }
 
+    update_video_progress(db, id, 100.0).await?;
     Ok(())
 }
 
 async fn generate_thumbnail(input_mp4: &Path, out_dir: &Path) -> AppResult<()> {
+    if env::var("FFMPEG_DRY_RUN").ok().as_deref() == Some("1") {
+        let thumb_path = out_dir.join("thumb.jpg");
+        let _ = fs::write(thumb_path, []);
+        return Ok(());
+    }
+
     let thumb_path = out_dir.join("thumb.jpg");
 
     let status = Command::new("ffmpeg")
@@ -696,6 +1261,8 @@ async fn process_video(
     processing_dir: PathBuf,
     final_dir: PathBuf,
     db: SqlitePool,
+    settings: HlsSettings,
+    retry: RetrySettings,
 ) {
     if let Err(e) = ensure_dirs() {
         let _ = write_processing_log(&id, "ERROR", &e.user_message(), &e.detail_message());
@@ -708,14 +1275,29 @@ async fn process_video(
     }
 
     if final_dir.join("master.m3u8").exists() {
-        let _ = fs::remove_file(&upload_path);
         let _ = mark_video_ready(&db, &id).await;
         release_processing_lock(&id);
         return;
     }
 
-    let title_path = processing_dir.join("title.txt");
-    let title = fs::read_to_string(&title_path).ok();
+    if !upload_path.exists() {
+        let message = "Original upload missing; cannot process.";
+        let _ = write_processing_log(&id, "ERROR", message, "upload file missing");
+        let _ = mark_video_error(&db, &id, message, "upload file missing").await;
+        release_processing_lock(&id);
+        return;
+    }
+
+    let _ = update_video_progress(&db, &id, 0.0).await;
+
+    let metadata = match probe_video_metadata(&upload_path).await {
+        Ok(metadata) => Some(metadata),
+        Err(err) => {
+            let _ = write_processing_log(&id, "WARN", "Metadata probe failed.", &err.detail_message());
+            None
+        }
+    };
+
     if processing_dir.exists() {
         let _ = fs::remove_dir_all(&processing_dir);
     }
@@ -729,16 +1311,40 @@ async fn process_video(
         release_processing_lock(&id);
         return;
     }
-    if let Some(title) = title {
-        let _ = fs::write(processing_dir.join("title.txt"), title);
+    if let Some(ref metadata) = metadata {
+        let _ = update_video_metadata(
+            &db,
+            &id,
+            metadata.duration_seconds,
+            metadata.width,
+            metadata.height,
+        )
+        .await;
     }
 
     let thumb_result = generate_thumbnail(&upload_path, &processing_dir).await;
-    if let Err(e) = run_ffmpeg_to_hls(&upload_path, &processing_dir).await {
+    let default_meta = MediaMetadata {
+        duration_seconds: None,
+        width: None,
+        height: None,
+        has_audio: true,
+    };
+    let run_meta = metadata.as_ref().unwrap_or(&default_meta);
+    if let Err(e) = run_ffmpeg_to_hls(
+        &upload_path,
+        &processing_dir,
+        &settings,
+        run_meta,
+        &db,
+        &id,
+    )
+    .await
+    {
         let _ = write_processing_log(&id, "ERROR", &e.user_message(), &e.detail_message());
         let _ = mark_video_error(&db, &id, &e.user_message(), &e.detail_message()).await;
         let _ = fs::remove_dir_all(&processing_dir);
         release_processing_lock(&id);
+        let _ = schedule_retry(&id, &db, settings.clone(), retry).await;
         return;
     }
 
@@ -756,7 +1362,6 @@ async fn process_video(
         release_processing_lock(&id);
         return;
     }
-    let _ = fs::remove_file(&upload_path);
     let _ = mark_video_ready(&db, &id).await;
     release_processing_lock(&id);
 
@@ -770,11 +1375,39 @@ async fn process_video(
     }
 }
 
-fn spawn_processing_task(id: String, db: SqlitePool) {
+async fn schedule_retry(
+    id: &str,
+    db: &SqlitePool,
+    settings: HlsSettings,
+    retry: RetrySettings,
+) -> AppResult<()> {
+    let retries = bump_retry_count(db, id).await?;
+    if retries > retry.max_retries {
+        return Ok(());
+    }
+    reset_for_reprocess(db, id).await?;
+    let id = id.to_string();
+    let db = db.clone();
+    task::spawn(async move {
+        sleep(Duration::from_secs(retry.delay_secs)).await;
+        spawn_processing_task(id, db, settings, retry);
+    });
+    Ok(())
+}
+
+fn spawn_processing_task(id: String, db: SqlitePool, settings: HlsSettings, retry: RetrySettings) {
     let upload_path = upload_dir().join(format!("{id}.mp4"));
     let processing_dir = processing_hls_dir(&id);
     let final_dir = final_hls_dir(&id);
-    task::spawn(process_video(id, upload_path, processing_dir, final_dir, db));
+    task::spawn(process_video(
+        id,
+        upload_path,
+        processing_dir,
+        final_dir,
+        db,
+        settings,
+        retry,
+    ));
 }
 
 async fn ensure_video_record(pool: &SqlitePool, id: &str) -> AppResult<()> {
@@ -813,7 +1446,6 @@ async fn scan_uploads_for_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> {
         let final_dir = final_hls_dir(&id);
         let processing_dir = processing_hls_dir(&id);
         if final_dir.join("master.m3u8").exists() {
-            let _ = fs::remove_file(&path);
             let _ = mark_video_ready(pool, &id).await;
             continue;
         }
@@ -841,7 +1473,6 @@ async fn reconcile_processing_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> 
         }
 
         if master.exists() {
-            let _ = fs::remove_file(&upload_path);
             let _ = fs::remove_dir_all(&processing_dir);
             let _ = mark_video_ready(pool, &id).await;
             continue;
@@ -869,12 +1500,102 @@ async fn index(state: &State<AppState>) -> Template {
         Ok(videos) if !videos.is_empty() => videos,
         Ok(_) | Err(_) => list_videos_from_fs(),
     };
-    Template::render("index", context! { videos })
+    let mut processing_videos = Vec::new();
+    let mut ready_videos = Vec::new();
+    let mut error_videos = Vec::new();
+
+    for video in videos {
+        match video.status.as_str() {
+            STATUS_PROCESSING => processing_videos.push(video),
+            STATUS_ERROR => error_videos.push(video),
+            _ => ready_videos.push(video),
+        }
+    }
+
+    Template::render(
+        "index",
+        context! {
+            processing_videos,
+            ready_videos,
+            error_videos
+        },
+    )
 }
 
 #[get("/upload")]
 fn upload_page() -> Template {
     Template::render("upload", context! {})
+}
+
+#[get("/api/status/<id>")]
+async fn status_api(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<StatusResponse>, (Status, Json<ApiError>)> {
+    match read_video_status_full(&state.db, id).await.map_err(to_api_error)? {
+        Some(status) => Ok(Json(status)),
+        None => Err((Status::NotFound, Json(ApiError { message: "Video not found.".to_string() }))),
+    }
+}
+
+#[post("/api/video/<id>/rename", data = "<req>")]
+async fn rename_video(
+    state: &State<AppState>,
+    id: &str,
+    req: Json<RenameRequest>,
+) -> Result<Json<StatusResponse>, (Status, Json<ApiError>)> {
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err((Status::BadRequest, Json(ApiError { message: "Title cannot be empty.".to_string() })));
+    }
+
+    update_video_title(&state.db, id, title).await.map_err(to_api_error)?;
+    let status = read_video_status_full(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Video not found.".to_string() })))?;
+    Ok(Json(status))
+}
+
+#[post("/api/video/<id>/reprocess")]
+async fn reprocess_video(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<StatusResponse>, (Status, Json<ApiError>)> {
+    let upload_path = upload_dir().join(format!("{id}.mp4"));
+    if !upload_path.exists() {
+        return Err((Status::BadRequest, Json(ApiError { message: "Original upload missing; cannot reprocess.".to_string() })));
+    }
+
+    reset_for_reprocess(&state.db, id).await.map_err(to_api_error)?;
+    spawn_processing_task(id.to_string(), state.db.clone(), state.hls.clone(), state.retry);
+
+    let status = read_video_status_full(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Video not found.".to_string() })))?;
+    Ok(Json(status))
+}
+
+#[delete("/api/video/<id>")]
+async fn delete_video(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<serde_json::Value>, (Status, Json<ApiError>)> {
+    let final_dir = final_hls_dir(id);
+    let processing_dir = processing_hls_dir(id);
+    let upload_path = upload_dir().join(format!("{id}.mp4"));
+    let log_path = processing_log_path(id);
+    let lock_path = processing_lock_path(id);
+
+    let _ = fs::remove_dir_all(final_dir);
+    let _ = fs::remove_dir_all(processing_dir);
+    let _ = fs::remove_file(upload_path);
+    let _ = fs::remove_file(log_path);
+    let _ = fs::remove_file(lock_path);
+
+    delete_video_record(&state.db, id).await.map_err(to_api_error)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[post("/upload", data = "<form>")]
@@ -915,15 +1636,11 @@ async fn upload_post(
         }
     }
 
-    if !title.is_empty() {
-        let _ = fs::write(out_dir.join("title.txt"), &title);
-    }
-
     let title_for_db = if title.trim().is_empty() { id.clone() } else { title.clone() };
     insert_video(&state.db, &id, &title_for_db).await.map_err(to_api_error)?;
 
     // Spawn background processing so the request returns immediately.
-    spawn_processing_task(id.clone(), state.db.clone());
+    spawn_processing_task(id.clone(), state.db.clone(), state.hls.clone(), state.retry);
 
     Ok(Json(UploadResult {
         id: id.clone(),
@@ -938,15 +1655,44 @@ async fn watch(state: &State<AppState>, id: &str) -> Template {
     let out_dir = final_hls_dir(id);
     let master = out_dir.join("master.m3u8");
 
-    let ready = master.exists();
+    let mut ready = master.exists();
     let mut error = read_processing_error(id);
-    if let Ok(Some((status, db_error))) = read_video_status(&state.db, id).await {
-        if status == STATUS_ERROR {
-            error = db_error.or(error);
+    let mut title = id_owned.clone();
+    let mut duration_seconds = None;
+    let mut width = None;
+    let mut height = None;
+    let mut created_at = unix_ts();
+    let mut retries = 0;
+    let mut upload_available = upload_dir().join(format!("{id}.mp4")).exists();
+
+    if let Ok(Some(status)) = read_video_status_full(&state.db, id).await {
+        if status.status == STATUS_ERROR {
+            error = status.error.clone().or(error);
         }
+        if status.status == STATUS_READY {
+            ready = true;
+        }
+        title = status.title;
+        duration_seconds = status.duration_seconds;
+        width = status.width;
+        height = status.height;
+        created_at = status.created_at;
+        retries = status.retries;
+        upload_available = status.upload_available;
     }
 
-    let ctx = WatchContext { id: id_owned, ready, error };
+    let ctx = WatchContext {
+        id: id_owned,
+        ready,
+        error,
+        title,
+        duration_seconds,
+        width,
+        height,
+        created_at,
+        retries,
+        upload_available,
+    };
     Template::render("watch", context! { ctx })
 }
 
@@ -994,13 +1740,31 @@ fn rocket() -> _ {
     let static_path = PathBuf::from("static");
 
     rocket::build()
-        .mount("/", routes![index, upload_page, upload_post, watch, hls_js, hls_js_map])
+        .mount(
+            "/",
+            routes![
+                index,
+                upload_page,
+                upload_post,
+                watch,
+                status_api,
+                rename_video,
+                reprocess_video,
+                delete_video,
+                hls_js,
+                hls_js_map
+            ],
+        )
         .mount("/hls", FileServer::from(hls_path))
         .mount("/static", FileServer::from(static_path))
         .attach(Template::fairing())
         .attach(AdHoc::on_ignite("SQLite", |rocket| async {
             let db = init_db().await.expect("failed to initialize sqlite");
-            rocket.manage(AppState { db })
+            rocket.manage(AppState {
+                db,
+                hls: hls_settings(),
+                retry: retry_settings(),
+            })
         }))
         .attach(AdHoc::on_liftoff("ResumeProcessing", |rocket| {
             Box::pin(async move {
@@ -1010,7 +1774,7 @@ fn rocket() -> _ {
 
                 if let Ok(ids) = reconcile_processing_jobs(&state.db).await {
                     for id in ids {
-                        spawn_processing_task(id, state.db.clone());
+                        spawn_processing_task(id, state.db.clone(), state.hls.clone(), state.retry);
                     }
                 }
             })
@@ -1022,13 +1786,15 @@ fn rocket() -> _ {
                 };
 
                 let pool = state.db.clone();
+                let hls = state.hls.clone();
+                let retry = state.retry;
                 task::spawn(async move {
                     let mut ticker = rocket::tokio::time::interval(Duration::from_secs(UPLOAD_SCAN_INTERVAL_SECS));
                     loop {
                         ticker.tick().await;
                         if let Ok(ids) = scan_uploads_for_jobs(&pool).await {
                             for id in ids {
-                                spawn_processing_task(id, pool.clone());
+                                spawn_processing_task(id, pool.clone(), hls.clone(), retry);
                             }
                         }
                     }
@@ -1036,4 +1802,84 @@ fn rocket() -> _ {
             })
         }))
         .register("/", catchers![not_found, payload_too_large, server_error])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::http::{ContentType, Status};
+    use rocket::local::asynchronous::Client;
+    use serde_json::Value;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn build_multipart(title: &str, filename: &str, content: &str, boundary: &str) -> Vec<u8> {
+        let mut body = String::new();
+        body.push_str(&format!("--{boundary}\r\n"));
+        body.push_str("Content-Disposition: form-data; name=\"title\"\r\n\r\n");
+        body.push_str(title);
+        body.push_str("\r\n");
+        body.push_str(&format!("--{boundary}\r\n"));
+        body.push_str(&format!(
+            "Content-Disposition: form-data; name=\"video\"; filename=\"{filename}\"\r\n"
+        ));
+        body.push_str("Content-Type: video/mp4\r\n\r\n");
+        body.push_str(content);
+        body.push_str("\r\n");
+        body.push_str(&format!("--{boundary}--\r\n"));
+        body.into_bytes()
+    }
+
+    #[rocket::async_test]
+    async fn test_upload_watch_flow() {
+        let temp = TempDir::new().expect("tempdir");
+        env::set_var("DATA_DIR", temp.path());
+        env::set_var("SQLITE_PATH", temp.path().join("app.db"));
+        env::set_var("FFMPEG_DRY_RUN", "1");
+
+        let client = Client::tracked(rocket()).await.expect("client");
+
+        let boundary = "BOUNDARY123";
+        let body = build_multipart("Test Video", "video.mp4", "dummy-video", boundary);
+        let resp = client
+            .post("/upload")
+            .header(ContentType::with_params("multipart", "form-data", ("boundary", boundary)))
+            .body(body)
+            .dispatch()
+            .await;
+
+        assert_eq!(resp.status(), Status::Ok);
+        let data: Value = resp.into_json().await.expect("json");
+        let id = data["id"].as_str().expect("id");
+
+        let mut ready = false;
+        for _ in 0..20 {
+            let status_resp = client.get(format!("/api/status/{id}")).dispatch().await;
+            assert!(status_resp.status().class().is_success());
+            let status: Value = status_resp.into_json().await.expect("status json");
+            if status["status"] == "ready" {
+                ready = true;
+                break;
+            }
+            rocket::tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(ready, "video should become ready");
+
+        let watch = client.get(format!("/watch/{id}")).dispatch().await;
+        assert_eq!(watch.status(), Status::Ok);
+
+        let rename = client
+            .post(format!("/api/video/{id}/rename"))
+            .header(ContentType::JSON)
+            .body(r#"{"title":"Renamed"}"#)
+            .dispatch()
+            .await;
+        assert_eq!(rename.status(), Status::Ok);
+
+        let delete = client.delete(format!("/api/video/{id}")).dispatch().await;
+        assert_eq!(delete.status(), Status::Ok);
+
+        let missing = client.get(format!("/api/status/{id}")).dispatch().await;
+        assert_eq!(missing.status(), Status::NotFound);
+    }
 }

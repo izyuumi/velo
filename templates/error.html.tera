@@ -29,6 +29,8 @@
     h1 { margin: 8px 0 12px; }
     p { margin: 0 0 16px; color: var(--text); }
     a { color: var(--link); font-weight: 600; text-decoration: none; }
+    .actions { display: flex; gap: 12px; }
+    .actions a { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--link); }
   </style>
 </head>
 <body>
@@ -36,7 +38,10 @@
     <div class="code">Error {{ code }}</div>
     <h1>{{ title }}</h1>
     <p>{{ message }}</p>
-    <a href="/">Back to home</a>
+    <div class="actions">
+      <a href="/">Back to home</a>
+      <a href="/upload">Upload</a>
+    </div>
   </div>
 </body>
 </html>

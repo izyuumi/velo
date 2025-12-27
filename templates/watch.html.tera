@@ -31,34 +31,128 @@
     .notice { padding: 10px 12px; border-radius: 8px; margin: 12px 0; }
     .notice.error { background: var(--notice-error-bg); color: var(--notice-error-text); }
     .notice.info { background: var(--notice-info-bg); color: var(--notice-info-text); }
+    .meta { color: var(--text); margin: 8px 0 16px; display: flex; gap: 12px; flex-wrap: wrap; font-size: 14px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    .actions button,
+    .edit-panel button {
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: none;
+      background: var(--link);
+      color: #fff;
+      cursor: pointer;
+    }
+    .actions button.secondary,
+    .edit-panel button.secondary {
+      background: transparent;
+      color: var(--link);
+      border: 1px solid var(--link);
+    }
+    .edit-panel {
+      display: none;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 12px 0;
+    }
+    .edit-panel input {
+      padding: 8px 10px;
+      font-size: 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(0,0,0,0.2);
+      min-width: 220px;
+      background: transparent;
+      color: inherit;
+    }
+    .progress {
+      height: 8px;
+      background: rgba(0,0,0,0.08);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--link);
+      transition: width 120ms ease;
+    }
   </style>
 </head>
-<body>
+<body data-ready="{{ ctx.ready }}">
   <p><a href="/">Back</a></p>
-  <h1>Watch</h1>
+  <h1 id="title">{{ ctx.title }}</h1>
+  <div class="meta">
+    {% if ctx.width and ctx.height %}
+      <span>{{ ctx.width }}×{{ ctx.height }}</span>
+    {% endif %}
+    <span id="duration" data-duration="{{ ctx.duration_seconds | default(value=0) }}">--:--</span>
+    <span id="created" data-created="{{ ctx.created_at }}">--</span>
+  </div>
 
-  {% if ctx.error %}
-    <p class="notice error">Processing failed: {{ ctx.error }}</p>
-  {% elif ctx.ready %}
-    <p id="playerStatus" class="notice info" style="display:none;"></p>
-    <video id="video" controls style="width: 100%; max-height: 70vh;"></video>
-    <script>
-      const video = document.getElementById('video');
-      const statusEl = document.getElementById('playerStatus');
-      const src = `/hls/{{ ctx.id }}/master.m3u8`;
+  <div class="actions">
+    <button id="editToggle" type="button" class="secondary">Edit</button>
+  </div>
+  <div id="editPanel" class="edit-panel">
+    <input id="renameInput" type="text" value="{{ ctx.title }}" />
+    <button id="renameBtn" type="button">Save</button>
+    <button id="cancelEdit" type="button" class="secondary">Cancel</button>
+    <button id="deleteBtn" type="button" class="secondary">Delete</button>
+  </div>
 
-      window.addEventListener('unhandledrejection', (event) => {
-        if (event.reason && event.reason.name === 'AbortError') {
-          event.preventDefault();
-        }
-      });
+  <p id="processingNotice" class="notice info" style="display:none;">Processing…</p>
+  <div id="processingProgress" class="progress" style="display:none;"><div class="progress-fill" id="processingFill"></div></div>
+  <p id="errorNotice" class="notice error" style="display:{% if ctx.error %}block{% else %}none{% endif %};">
+    {% if ctx.error %}Processing failed: {{ ctx.error }}{% endif %}
+  </p>
+  <p id="playerStatus" class="notice info" style="display:none;"></p>
+  <video id="video" controls style="width: 100%; max-height: 70vh; display:none;"></video>
 
-      function setPlayerStatus(msg) {
-        if (!statusEl) return;
-        statusEl.textContent = msg || '';
-        statusEl.style.display = msg ? 'block' : 'none';
+  <script>
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('playerStatus');
+    const processingNotice = document.getElementById('processingNotice');
+    const errorNotice = document.getElementById('errorNotice');
+    const processingFill = document.getElementById('processingFill');
+    const processingProgress = document.getElementById('processingProgress');
+    const renameInput = document.getElementById('renameInput');
+    const renameBtn = document.getElementById('renameBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const editToggle = document.getElementById('editToggle');
+    const editPanel = document.getElementById('editPanel');
+    const cancelEdit = document.getElementById('cancelEdit');
+    const titleEl = document.getElementById('title');
+    const durationEl = document.getElementById('duration');
+    const createdEl = document.getElementById('created');
+    const src = `/hls/{{ ctx.id }}/master.m3u8`;
+
+    const fmtDuration = (sec) => {
+      if (!sec || sec <= 0) return '--:--';
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60).toString().padStart(2, '0');
+      return `${m}:${s}`;
+    };
+    const fmtDate = (ts) => {
+      if (!ts) return '--';
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString();
+    };
+    durationEl.textContent = fmtDuration(Number(durationEl.dataset.duration || 0));
+    createdEl.textContent = fmtDate(Number(createdEl.dataset.created || 0));
+
+    window.addEventListener('unhandledrejection', (event) => {
+      if (event.reason && event.reason.name === 'AbortError') {
+        event.preventDefault();
       }
+    });
 
+    function setPlayerStatus(msg) {
+      statusEl.textContent = msg || '';
+      statusEl.style.display = msg ? 'block' : 'none';
+    }
+
+    function loadPlayer() {
+      if (video.dataset.loaded) return;
+      video.dataset.loaded = '1';
+      video.style.display = 'block';
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;
       } else if (Hls.isSupported()) {
@@ -73,13 +167,93 @@
       } else {
         video.outerHTML = "<p class=\"notice error\">Your browser can't play HLS. Try Safari or a modern Chrome/Firefox.</p>";
       }
-
       video.addEventListener('error', () => {
         setPlayerStatus('We hit a playback error. Refresh the page or try again later.');
       });
-    </script>
-  {% else %}
-    <p class="notice info">Processing… refresh in a moment. If this takes too long, check your upload size and format.</p>
-  {% endif %}
+    }
+
+    async function pollStatus() {
+      const resp = await fetch(`/api/status/{{ ctx.id }}`);
+      if (!resp.ok) return;
+      const status = await resp.json();
+      titleEl.textContent = status.title || titleEl.textContent;
+      renameInput.value = status.title || renameInput.value;
+      durationEl.textContent = fmtDuration(status.duration_seconds || 0);
+      createdEl.textContent = fmtDate(status.created_at || 0);
+
+      if (status.status === 'ready') {
+        processingNotice.style.display = 'none';
+        processingProgress.style.display = 'none';
+        errorNotice.style.display = 'none';
+        loadPlayer();
+        return true;
+      }
+
+      if (status.status === 'error') {
+        processingNotice.style.display = 'none';
+        processingProgress.style.display = 'none';
+        errorNotice.textContent = `Processing failed: ${status.error || 'Unknown error'}`;
+        errorNotice.style.display = 'block';
+        return false;
+      }
+
+      processingNotice.style.display = 'block';
+      processingProgress.style.display = 'block';
+      const pct = typeof status.progress === 'number' ? Math.min(99, Math.max(0, Math.round(status.progress))) : 0;
+      processingFill.style.width = `${pct}%`;
+      return false;
+    }
+
+    async function pollLoop() {
+      let ready = document.body.dataset.ready === 'true';
+      if (ready) {
+        loadPlayer();
+        return;
+      }
+      for (let i = 0; i < 200; i += 1) {
+        const done = await pollStatus();
+        if (done) return;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+      processingNotice.textContent = 'Still processing… try refreshing later.';
+    }
+
+    renameBtn.addEventListener('click', async () => {
+      const title = renameInput.value.trim();
+      if (!title) return;
+      const resp = await fetch(`/api/video/{{ ctx.id }}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title })
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        setPlayerStatus(data.message || 'Rename failed.');
+        return;
+      }
+      const data = await resp.json();
+      titleEl.textContent = data.title;
+    });
+
+    editToggle.addEventListener('click', () => {
+      editPanel.style.display = editPanel.style.display === 'flex' ? 'none' : 'flex';
+    });
+
+    cancelEdit.addEventListener('click', () => {
+      renameInput.value = titleEl.textContent;
+      editPanel.style.display = 'none';
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+      const confirmDelete = window.confirm('Delete this video? This cannot be undone.');
+      if (!confirmDelete) return;
+      const resp = await fetch(`/api/video/{{ ctx.id }}`, { method: 'DELETE' });
+      if (resp.ok) {
+        window.location.href = '/';
+      }
+    });
+
+    pollLoop();
+  </script>
 </body>
 </html>

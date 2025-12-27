@@ -1,0 +1,5 @@
+- [x] Review current upload → processing → watch flow end to end
+- [x] Add watch-page auto-refresh/polling until HLS is ready
+- [x] Add upload status/progress indicators per file
+- [x] Generate multi-bitrate HLS ladder for adaptive playback
+- [x] Add integration tests for upload/watch routes
