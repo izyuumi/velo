@@ -1630,10 +1630,8 @@ async fn probe_video_metadata(input_mp4: &Path) -> AppResult<MediaMetadata> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
-        .arg("-select_streams")
-        .arg("v:0")
         .arg("-show_entries")
-        .arg("stream=width,height")
+        .arg("stream=width,height,codec_type")
         .arg("-show_entries")
         .arg("format=duration")
         .arg("-of")
@@ -1662,10 +1660,17 @@ async fn probe_video_metadata(input_mp4: &Path) -> AppResult<MediaMetadata> {
         .and_then(|s| s.parse::<f64>().ok())
         .map(|d| d.round() as i64);
 
-    let (width, height) = value
-        .get("streams")
-        .and_then(|s| s.as_array())
-        .and_then(|arr| arr.get(0))
+    let streams = value.get("streams").and_then(|s| s.as_array());
+
+    let (width, height) = streams
+        .and_then(|arr| {
+            arr.iter().find(|s| {
+                s.get("codec_type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "video")
+                    .unwrap_or(false)
+            })
+        })
         .map(|stream| {
             let width = stream.get("width").and_then(|v| v.as_i64());
             let height = stream.get("height").and_then(|v| v.as_i64());
@@ -1673,9 +1678,7 @@ async fn probe_video_metadata(input_mp4: &Path) -> AppResult<MediaMetadata> {
         })
         .unwrap_or((None, None));
 
-    let has_audio = value
-        .get("streams")
-        .and_then(|s| s.as_array())
+    let has_audio = streams
         .map(|arr| {
             arr.iter().any(|stream| {
                 stream
@@ -1807,7 +1810,7 @@ async fn run_ffmpeg_to_hls(
 
     let var_map: String = if metadata.has_audio {
         (0..settings.variants.len())
-            .map(|idx| format!("v:{},a:{}", idx * 2, idx * 2 + 1))
+            .map(|idx| format!("v:{idx},a:{idx}"))
             .collect::<Vec<_>>()
             .join(" ")
     } else {

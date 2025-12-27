@@ -85,7 +85,7 @@ export function IndexPage() {
   }
 
   const selectAll = () => {
-    const allIds = readyVideos.map((v) => v.id)
+    const allIds = [...readyVideos, ...processingVideos, ...errorVideos].map((v) => v.id)
     setSelectedIds(new Set(allIds))
   }
 
@@ -278,7 +278,13 @@ export function IndexPage() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {processingVideos.map((video) => (
-              <VideoCard key={video.id} video={video} />
+              <VideoCard
+                key={video.id}
+                video={video}
+                showCheckbox={selectionMode}
+                isSelected={selectedIds.has(video.id)}
+                onSelect={toggleSelect}
+              />
             ))}
           </div>
         </section>
@@ -311,7 +317,13 @@ export function IndexPage() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {errorVideos.map((video) => (
-              <VideoCard key={video.id} video={video} />
+              <VideoCard
+                key={video.id}
+                video={video}
+                showCheckbox={selectionMode}
+                isSelected={selectedIds.has(video.id)}
+                onSelect={toggleSelect}
+              />
             ))}
           </div>
         </section>
