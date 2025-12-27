@@ -130,7 +130,12 @@
     const fmtDate = (ts) => {
       if (!ts) return '--';
       const d = new Date(ts * 1000);
-      return d.toLocaleDateString();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const h = String(d.getHours()).padStart(2, '0');
+      const min = String(d.getMinutes()).padStart(2, '0');
+      return `${y}/${m}/${day} ${h}:${min}`;
     };
     durationEl.textContent = fmtDuration(Number(durationEl.dataset.duration || 0));
     createdEl.textContent = fmtDate(Number(createdEl.dataset.created || 0));
