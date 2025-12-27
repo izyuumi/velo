@@ -178,7 +178,7 @@ struct UploadForm<'r> {
     title: Option<&'r str>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct VideoItem {
     id: String,
     title: String,
@@ -190,6 +190,10 @@ struct VideoItem {
     width: Option<i64>,
     height: Option<i64>,
     created_at: i64,
+    series_id: Option<String>,
+    episode_number: Option<i64>,
+    watch_position: Option<i64>,
+    watch_completed: bool,
 }
 
 
@@ -214,11 +218,92 @@ struct StatusResponse {
     created_at: i64,
     retries: i64,
     upload_available: bool,
+    series_id: Option<String>,
+    series_title: Option<String>,
+    episode_number: Option<i64>,
+    next_episode_id: Option<String>,
+    prev_episode_id: Option<String>,
+    watch_position: Option<i64>,
+    watch_completed: bool,
 }
 
 #[derive(Deserialize)]
 struct RenameRequest {
     title: String,
+}
+
+#[derive(Serialize, Clone)]
+struct SeriesItem {
+    id: String,
+    title: String,
+    description: Option<String>,
+    cover_video_id: Option<String>,
+    cover_thumbnail: Option<String>,
+    episode_count: i64,
+    total_duration: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+    watched_count: i64,
+    in_progress_count: i64,
+}
+
+#[derive(Serialize)]
+struct SeriesDetail {
+    id: String,
+    title: String,
+    description: Option<String>,
+    cover_video_id: Option<String>,
+    episodes: Vec<VideoItem>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Deserialize)]
+struct CreateSeriesRequest {
+    title: String,
+    description: Option<String>,
+    video_ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct UpdateSeriesRequest {
+    title: Option<String>,
+    description: Option<String>,
+    cover_video_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AddVideosToSeriesRequest {
+    video_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ReorderEpisodesRequest {
+    video_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateProgressRequest {
+    position_seconds: i64,
+    completed: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct WatchProgressResponse {
+    video_id: String,
+    position_seconds: i64,
+    completed: bool,
+}
+
+#[derive(Deserialize)]
+struct BulkDeleteRequest {
+    video_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct BulkAddToSeriesRequest {
+    video_ids: Vec<String>,
+    series_id: String,
 }
 
 fn ensure_dirs() -> AppResult<()> {
@@ -294,6 +379,10 @@ fn list_videos_from_fs() -> Vec<VideoItem> {
                 width: None,
                 height: None,
                 created_at,
+                series_id: None,
+                episode_number: None,
+                watch_position: None,
+                watch_completed: false,
             });
         }
     }
@@ -430,6 +519,80 @@ async fn run_migrations(pool: &SqlitePool) -> AppResult<()> {
                 source: e,
             })?;
         sqlx::query("INSERT INTO schema_migrations (version) VALUES (2)")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "recording schema migration",
+                source: e,
+            })?;
+    }
+
+    if current_version < 3 {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS series (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                cover_video_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "creating series table",
+            source: e,
+        })?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_series_created_at ON series(created_at DESC)")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "creating series index on created_at",
+                source: e,
+            })?;
+
+        sqlx::query("ALTER TABLE videos ADD COLUMN series_id TEXT REFERENCES series(id)")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding series_id column",
+                source: e,
+            })?;
+
+        sqlx::query("ALTER TABLE videos ADD COLUMN episode_number INTEGER")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "adding episode_number column",
+                source: e,
+            })?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_videos_series ON videos(series_id, episode_number)")
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "creating videos index on series_id",
+                source: e,
+            })?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS watch_progress (
+                video_id TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+                position_seconds INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "creating watch_progress table",
+            source: e,
+        })?;
+
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES (3)")
             .execute(pool)
             .await
             .map_err(|e| AppError::Database {
@@ -697,16 +860,37 @@ async fn reset_for_reprocess(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
-    let rows = sqlx::query(
-        "SELECT id, title, status, error_message, progress, duration_seconds, width, height, created_at
-         FROM videos
-         ORDER BY created_at DESC
-         LIMIT ?",
-    )
-    .bind(MAX_LIST_VIDEOS)
-    .fetch_all(pool)
-    .await
+async fn list_videos(pool: &SqlitePool, search: Option<&str>) -> AppResult<Vec<VideoItem>> {
+    let search_pattern = search.map(|s| format!("%{s}%"));
+    let rows = if search_pattern.is_some() {
+        sqlx::query(
+            "SELECT v.id, v.title, v.status, v.error_message, v.progress, v.duration_seconds,
+                    v.width, v.height, v.created_at, v.series_id, v.episode_number,
+                    wp.position_seconds as watch_position, wp.completed as watch_completed
+             FROM videos v
+             LEFT JOIN watch_progress wp ON v.id = wp.video_id
+             WHERE v.title LIKE ?
+             ORDER BY v.created_at DESC
+             LIMIT ?",
+        )
+        .bind(&search_pattern)
+        .bind(MAX_LIST_VIDEOS)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query(
+            "SELECT v.id, v.title, v.status, v.error_message, v.progress, v.duration_seconds,
+                    v.width, v.height, v.created_at, v.series_id, v.episode_number,
+                    wp.position_seconds as watch_position, wp.completed as watch_completed
+             FROM videos v
+             LEFT JOIN watch_progress wp ON v.id = wp.video_id
+             ORDER BY v.created_at DESC
+             LIMIT ?",
+        )
+        .bind(MAX_LIST_VIDEOS)
+        .fetch_all(pool)
+        .await
+    }
     .map_err(|e| AppError::Database {
         action: "listing videos",
         source: e,
@@ -727,6 +911,10 @@ async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
         let width: Option<i64> = row.try_get("width").ok();
         let height: Option<i64> = row.try_get("height").ok();
         let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+        let series_id: Option<String> = row.try_get("series_id").ok().flatten();
+        let episode_number: Option<i64> = row.try_get("episode_number").ok().flatten();
+        let watch_position: Option<i64> = row.try_get("watch_position").ok().flatten();
+        let watch_completed: bool = row.try_get::<i64, _>("watch_completed").ok().map(|v| v != 0).unwrap_or(false);
         let display_title = if title.trim().is_empty() { id.clone() } else { title };
 
         let mut status = status;
@@ -765,6 +953,10 @@ async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
             width,
             height,
             created_at,
+            series_id,
+            episode_number,
+            watch_position,
+            watch_completed,
         });
     }
 
@@ -773,9 +965,14 @@ async fn list_videos(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
 
 async fn read_video_status_full(pool: &SqlitePool, id: &str) -> AppResult<Option<StatusResponse>> {
     let row = sqlx::query(
-        "SELECT id, title, status, error_message, progress, duration_seconds, width, height, created_at, retries
-         FROM videos
-         WHERE id = ?",
+        "SELECT v.id, v.title, v.status, v.error_message, v.progress, v.duration_seconds,
+                v.width, v.height, v.created_at, v.retries, v.series_id, v.episode_number,
+                s.title as series_title,
+                wp.position_seconds as watch_position, wp.completed as watch_completed
+         FROM videos v
+         LEFT JOIN series s ON v.series_id = s.id
+         LEFT JOIN watch_progress wp ON v.id = wp.video_id
+         WHERE v.id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -799,6 +996,40 @@ async fn read_video_status_full(pool: &SqlitePool, id: &str) -> AppResult<Option
     let height: Option<i64> = row.try_get("height").ok();
     let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
     let retries: i64 = row.try_get("retries").unwrap_or_default();
+    let series_id: Option<String> = row.try_get("series_id").ok().flatten();
+    let series_title: Option<String> = row.try_get("series_title").ok().flatten();
+    let episode_number: Option<i64> = row.try_get("episode_number").ok().flatten();
+    let watch_position: Option<i64> = row.try_get("watch_position").ok().flatten();
+    let watch_completed: bool = row.try_get::<i64, _>("watch_completed").ok().map(|v| v != 0).unwrap_or(false);
+
+    let (next_episode_id, prev_episode_id) = if let (Some(ref sid), Some(ep_num)) = (&series_id, episode_number) {
+        let next: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM videos WHERE series_id = ? AND episode_number = ? AND status = 'ready'"
+        )
+        .bind(sid)
+        .bind(ep_num + 1)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let prev: Option<String> = if ep_num > 1 {
+            sqlx::query_scalar(
+                "SELECT id FROM videos WHERE series_id = ? AND episode_number = ? AND status = 'ready'"
+            )
+            .bind(sid)
+            .bind(ep_num - 1)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        (next, prev)
+    } else {
+        (None, None)
+    };
 
     let upload_available = upload_dir().join(format!("{id}.mp4")).exists();
     Ok(Some(StatusResponse {
@@ -814,6 +1045,13 @@ async fn read_video_status_full(pool: &SqlitePool, id: &str) -> AppResult<Option
         created_at,
         retries,
         upload_available,
+        series_id,
+        series_title,
+        episode_number,
+        next_episode_id,
+        prev_episode_id,
+        watch_position,
+        watch_completed,
     }))
 }
 
@@ -839,6 +1077,11 @@ async fn list_processing_ids(pool: &SqlitePool) -> AppResult<Vec<String>> {
 }
 
 async fn delete_video_record(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM watch_progress WHERE video_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM videos WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -848,6 +1091,464 @@ async fn delete_video_record(pool: &SqlitePool, id: &str) -> AppResult<()> {
             source: e,
         })?;
     Ok(())
+}
+
+async fn list_series(pool: &SqlitePool) -> AppResult<Vec<SeriesItem>> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.title, s.description, s.cover_video_id, s.created_at, s.updated_at,
+                COUNT(v.id) as episode_count,
+                SUM(CASE WHEN v.duration_seconds IS NOT NULL THEN v.duration_seconds ELSE 0 END) as total_duration,
+                SUM(CASE WHEN wp.completed = 1 THEN 1 ELSE 0 END) as watched_count,
+                SUM(CASE WHEN wp.position_seconds > 0 AND (wp.completed IS NULL OR wp.completed = 0) THEN 1 ELSE 0 END) as in_progress_count
+         FROM series s
+         LEFT JOIN videos v ON v.series_id = s.id AND v.status = 'ready'
+         LEFT JOIN watch_progress wp ON v.id = wp.video_id
+         GROUP BY s.id
+         ORDER BY s.updated_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "listing series",
+        source: e,
+    })?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id").unwrap_or_default();
+        let title: String = row.try_get("title").unwrap_or_default();
+        let description: Option<String> = row.try_get("description").ok().flatten();
+        let cover_video_id: Option<String> = row.try_get("cover_video_id").ok().flatten();
+        let episode_count: i64 = row.try_get("episode_count").unwrap_or(0);
+        let total_duration: Option<i64> = row.try_get("total_duration").ok().flatten();
+        let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+        let updated_at: i64 = row.try_get("updated_at").unwrap_or_else(|_| unix_ts());
+        let watched_count: i64 = row.try_get("watched_count").unwrap_or(0);
+        let in_progress_count: i64 = row.try_get("in_progress_count").unwrap_or(0);
+
+        let cover_thumbnail = cover_video_id
+            .as_ref()
+            .and_then(|vid| {
+                let path = final_hls_dir(vid).join("thumb.jpg");
+                path.exists().then(|| format!("/hls/{vid}/thumb.jpg"))
+            });
+
+        items.push(SeriesItem {
+            id,
+            title,
+            description,
+            cover_video_id,
+            cover_thumbnail,
+            episode_count,
+            total_duration,
+            created_at,
+            updated_at,
+            watched_count,
+            in_progress_count,
+        });
+    }
+
+    Ok(items)
+}
+
+async fn get_series_detail(pool: &SqlitePool, id: &str) -> AppResult<Option<SeriesDetail>> {
+    let row = sqlx::query(
+        "SELECT id, title, description, cover_video_id, created_at, updated_at
+         FROM series WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "getting series detail",
+        source: e,
+    })?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let series_id: String = row.try_get("id").unwrap_or_default();
+    let title: String = row.try_get("title").unwrap_or_default();
+    let description: Option<String> = row.try_get("description").ok().flatten();
+    let cover_video_id: Option<String> = row.try_get("cover_video_id").ok().flatten();
+    let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+    let updated_at: i64 = row.try_get("updated_at").unwrap_or_else(|_| unix_ts());
+
+    let episodes = get_series_episodes(pool, &series_id).await?;
+
+    Ok(Some(SeriesDetail {
+        id: series_id,
+        title,
+        description,
+        cover_video_id,
+        episodes,
+        created_at,
+        updated_at,
+    }))
+}
+
+async fn get_series_episodes(pool: &SqlitePool, series_id: &str) -> AppResult<Vec<VideoItem>> {
+    let rows = sqlx::query(
+        "SELECT v.id, v.title, v.status, v.error_message, v.progress, v.duration_seconds,
+                v.width, v.height, v.created_at, v.series_id, v.episode_number,
+                wp.position_seconds as watch_position, wp.completed as watch_completed
+         FROM videos v
+         LEFT JOIN watch_progress wp ON v.id = wp.video_id
+         WHERE v.series_id = ?
+         ORDER BY v.episode_number ASC",
+    )
+    .bind(series_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "getting series episodes",
+        source: e,
+    })?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id").unwrap_or_default();
+        let title: String = row.try_get("title").unwrap_or_else(|_| id.clone());
+        let status: String = row.try_get("status").unwrap_or_else(|_| STATUS_PROCESSING.to_string());
+        let error: Option<String> = row.try_get("error_message").ok();
+        let progress: Option<f64> = row.try_get("progress").ok();
+        let duration_seconds: Option<i64> = row.try_get("duration_seconds").ok();
+        let width: Option<i64> = row.try_get("width").ok();
+        let height: Option<i64> = row.try_get("height").ok();
+        let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+        let series_id: Option<String> = row.try_get("series_id").ok().flatten();
+        let episode_number: Option<i64> = row.try_get("episode_number").ok().flatten();
+        let watch_position: Option<i64> = row.try_get("watch_position").ok().flatten();
+        let watch_completed: bool = row.try_get::<i64, _>("watch_completed").ok().map(|v| v != 0).unwrap_or(false);
+        let display_title = if title.trim().is_empty() { id.clone() } else { title };
+
+        let thumb_url = if status == STATUS_READY {
+            let dir_path = final_hls_dir(&id);
+            dir_path.join("thumb.jpg").exists().then(|| format!("/hls/{id}/thumb.jpg"))
+        } else {
+            None
+        };
+
+        items.push(VideoItem {
+            id,
+            title: display_title,
+            status,
+            progress,
+            error,
+            thumbnail: thumb_url,
+            duration_seconds,
+            width,
+            height,
+            created_at,
+            series_id,
+            episode_number,
+            watch_position,
+            watch_completed,
+        });
+    }
+
+    Ok(items)
+}
+
+async fn create_series(pool: &SqlitePool, title: &str, description: Option<&str>) -> AppResult<String> {
+    let id = Uuid::new_v4().to_string();
+    let now = unix_ts();
+
+    sqlx::query(
+        "INSERT INTO series (id, title, description, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(title)
+    .bind(description)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "creating series",
+        source: e,
+    })?;
+
+    Ok(id)
+}
+
+async fn update_series_info(
+    pool: &SqlitePool,
+    id: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    cover_video_id: Option<&str>,
+) -> AppResult<()> {
+    let now = unix_ts();
+
+    if let Some(t) = title {
+        sqlx::query("UPDATE series SET title = ?, updated_at = ? WHERE id = ?")
+            .bind(t)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "updating series title",
+                source: e,
+            })?;
+    }
+
+    if let Some(d) = description {
+        sqlx::query("UPDATE series SET description = ?, updated_at = ? WHERE id = ?")
+            .bind(d)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "updating series description",
+                source: e,
+            })?;
+    }
+
+    if let Some(vid) = cover_video_id {
+        sqlx::query("UPDATE series SET cover_video_id = ?, updated_at = ? WHERE id = ?")
+            .bind(vid)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                action: "updating series cover",
+                source: e,
+            })?;
+    }
+
+    Ok(())
+}
+
+async fn delete_series(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    sqlx::query("UPDATE videos SET series_id = NULL, episode_number = NULL WHERE series_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "removing videos from series",
+            source: e,
+        })?;
+
+    sqlx::query("DELETE FROM series WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "deleting series",
+            source: e,
+        })?;
+
+    Ok(())
+}
+
+async fn add_videos_to_series(pool: &SqlitePool, series_id: &str, video_ids: &[String]) -> AppResult<()> {
+    let now = unix_ts();
+
+    let max_ep: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(episode_number), 0) FROM videos WHERE series_id = ?",
+    )
+    .bind(series_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    for (idx, vid) in video_ids.iter().enumerate() {
+        let ep_num = max_ep + (idx as i64) + 1;
+        sqlx::query(
+            "UPDATE videos SET series_id = ?, episode_number = ? WHERE id = ?",
+        )
+        .bind(series_id)
+        .bind(ep_num)
+        .bind(vid)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "adding video to series",
+            source: e,
+        })?;
+    }
+
+    sqlx::query("UPDATE series SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(series_id)
+        .execute(pool)
+        .await
+        .ok();
+
+    Ok(())
+}
+
+async fn remove_video_from_series(pool: &SqlitePool, video_id: &str) -> AppResult<()> {
+    sqlx::query("UPDATE videos SET series_id = NULL, episode_number = NULL WHERE id = ?")
+        .bind(video_id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "removing video from series",
+            source: e,
+        })?;
+
+    Ok(())
+}
+
+async fn reorder_series_episodes(pool: &SqlitePool, series_id: &str, video_ids: &[String]) -> AppResult<()> {
+    let now = unix_ts();
+
+    for (idx, vid) in video_ids.iter().enumerate() {
+        let ep_num = (idx as i64) + 1;
+        sqlx::query(
+            "UPDATE videos SET episode_number = ? WHERE id = ? AND series_id = ?",
+        )
+        .bind(ep_num)
+        .bind(vid)
+        .bind(series_id)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            action: "reordering episodes",
+            source: e,
+        })?;
+    }
+
+    sqlx::query("UPDATE series SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(series_id)
+        .execute(pool)
+        .await
+        .ok();
+
+    Ok(())
+}
+
+async fn update_watch_progress(pool: &SqlitePool, video_id: &str, position: i64, completed: bool) -> AppResult<()> {
+    let now = unix_ts();
+
+    sqlx::query(
+        "INSERT INTO watch_progress (video_id, position_seconds, completed, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(video_id) DO UPDATE
+         SET position_seconds = excluded.position_seconds,
+             completed = excluded.completed,
+             updated_at = excluded.updated_at",
+    )
+    .bind(video_id)
+    .bind(position)
+    .bind(if completed { 1 } else { 0 })
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "updating watch progress",
+        source: e,
+    })?;
+
+    Ok(())
+}
+
+async fn get_watch_progress(pool: &SqlitePool, video_id: &str) -> AppResult<Option<WatchProgressResponse>> {
+    let row = sqlx::query(
+        "SELECT video_id, position_seconds, completed FROM watch_progress WHERE video_id = ?",
+    )
+    .bind(video_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "getting watch progress",
+        source: e,
+    })?;
+
+    Ok(row.map(|r| WatchProgressResponse {
+        video_id: r.try_get("video_id").unwrap_or_default(),
+        position_seconds: r.try_get("position_seconds").unwrap_or(0),
+        completed: r.try_get::<i64, _>("completed").ok().map(|v| v != 0).unwrap_or(false),
+    }))
+}
+
+async fn get_continue_watching(pool: &SqlitePool) -> AppResult<Vec<VideoItem>> {
+    let rows = sqlx::query(
+        "SELECT v.id, v.title, v.status, v.error_message, v.progress, v.duration_seconds,
+                v.width, v.height, v.created_at, v.series_id, v.episode_number,
+                wp.position_seconds as watch_position, wp.completed as watch_completed
+         FROM videos v
+         INNER JOIN watch_progress wp ON v.id = wp.video_id
+         WHERE v.status = 'ready' AND wp.completed = 0 AND wp.position_seconds > 0
+         ORDER BY wp.updated_at DESC
+         LIMIT 10",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Database {
+        action: "getting continue watching",
+        source: e,
+    })?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.try_get("id").unwrap_or_default();
+        let title: String = row.try_get("title").unwrap_or_else(|_| id.clone());
+        let status: String = row.try_get("status").unwrap_or_else(|_| STATUS_READY.to_string());
+        let duration_seconds: Option<i64> = row.try_get("duration_seconds").ok();
+        let width: Option<i64> = row.try_get("width").ok();
+        let height: Option<i64> = row.try_get("height").ok();
+        let created_at: i64 = row.try_get("created_at").unwrap_or_else(|_| unix_ts());
+        let series_id: Option<String> = row.try_get("series_id").ok().flatten();
+        let episode_number: Option<i64> = row.try_get("episode_number").ok().flatten();
+        let watch_position: Option<i64> = row.try_get("watch_position").ok().flatten();
+        let watch_completed: bool = row.try_get::<i64, _>("watch_completed").ok().map(|v| v != 0).unwrap_or(false);
+        let display_title = if title.trim().is_empty() { id.clone() } else { title };
+
+        let thumb_url = {
+            let dir_path = final_hls_dir(&id);
+            dir_path.join("thumb.jpg").exists().then(|| format!("/hls/{id}/thumb.jpg"))
+        };
+
+        items.push(VideoItem {
+            id,
+            title: display_title,
+            status,
+            progress: Some(100.0),
+            error: None,
+            thumbnail: thumb_url,
+            duration_seconds,
+            width,
+            height,
+            created_at,
+            series_id,
+            episode_number,
+            watch_position,
+            watch_completed,
+        });
+    }
+
+    Ok(items)
+}
+
+async fn bulk_delete_videos(pool: &SqlitePool, video_ids: &[String]) -> AppResult<i64> {
+    let mut deleted = 0i64;
+    for id in video_ids {
+        let final_dir = final_hls_dir(id);
+        let processing_dir = processing_hls_dir(id);
+        let upload_path = upload_dir().join(format!("{id}.mp4"));
+        let log_path = processing_log_path(id);
+        let lock_path = processing_lock_path(id);
+
+        let _ = fs::remove_dir_all(final_dir);
+        let _ = fs::remove_dir_all(processing_dir);
+        let _ = fs::remove_file(upload_path);
+        let _ = fs::remove_file(log_path);
+        let _ = fs::remove_file(lock_path);
+
+        if delete_video_record(pool, id).await.is_ok() {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
 }
 
 fn processing_log_path(id: &str) -> PathBuf {
@@ -1461,13 +2162,24 @@ async fn reconcile_processing_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> 
     Ok(resume_ids)
 }
 
-#[get("/api/videos")]
-async fn list_videos_api(state: &State<AppState>) -> Json<Vec<VideoItem>> {
-    let videos = match list_videos(&state.db).await {
+#[derive(FromForm)]
+struct VideosQuery<'r> {
+    search: Option<&'r str>,
+}
+
+#[get("/api/videos?<query..>")]
+async fn list_videos_api(state: &State<AppState>, query: VideosQuery<'_>) -> Json<Vec<VideoItem>> {
+    let videos = match list_videos(&state.db, query.search).await {
         Ok(videos) if !videos.is_empty() => videos,
         Ok(_) | Err(_) => list_videos_from_fs(),
     };
     Json(videos)
+}
+
+#[get("/api/videos/continue")]
+async fn continue_watching_api(state: &State<AppState>) -> Result<Json<Vec<VideoItem>>, (Status, Json<ApiError>)> {
+    let videos = get_continue_watching(&state.db).await.map_err(to_api_error)?;
+    Ok(Json(videos))
 }
 
 #[get("/api/status/<id>")]
@@ -1539,6 +2251,189 @@ async fn delete_video(
 
     delete_video_record(&state.db, id).await.map_err(to_api_error)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[get("/api/series")]
+async fn list_series_api(state: &State<AppState>) -> Result<Json<Vec<SeriesItem>>, (Status, Json<ApiError>)> {
+    let series = list_series(&state.db).await.map_err(to_api_error)?;
+    Ok(Json(series))
+}
+
+#[post("/api/series", data = "<req>")]
+async fn create_series_api(
+    state: &State<AppState>,
+    req: Json<CreateSeriesRequest>,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err((Status::BadRequest, Json(ApiError { message: "Title cannot be empty.".to_string() })));
+    }
+
+    let series_id = create_series(&state.db, title, req.description.as_deref()).await.map_err(to_api_error)?;
+
+    if let Some(ref video_ids) = req.video_ids {
+        if !video_ids.is_empty() {
+            add_videos_to_series(&state.db, &series_id, video_ids).await.map_err(to_api_error)?;
+        }
+    }
+
+    let detail = get_series_detail(&state.db, &series_id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::InternalServerError, Json(ApiError { message: "Series creation failed.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[get("/api/series/<id>")]
+async fn get_series_api(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    let detail = get_series_detail(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[put("/api/series/<id>", data = "<req>")]
+async fn update_series_api(
+    state: &State<AppState>,
+    id: &str,
+    req: Json<UpdateSeriesRequest>,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    update_series_info(
+        &state.db,
+        id,
+        req.title.as_deref(),
+        req.description.as_deref(),
+        req.cover_video_id.as_deref(),
+    )
+    .await
+    .map_err(to_api_error)?;
+
+    let detail = get_series_detail(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[delete("/api/series/<id>")]
+async fn delete_series_api(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<serde_json::Value>, (Status, Json<ApiError>)> {
+    delete_series(&state.db, id).await.map_err(to_api_error)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[post("/api/series/<id>/videos", data = "<req>")]
+async fn add_videos_to_series_api(
+    state: &State<AppState>,
+    id: &str,
+    req: Json<AddVideosToSeriesRequest>,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    add_videos_to_series(&state.db, id, &req.video_ids).await.map_err(to_api_error)?;
+
+    let detail = get_series_detail(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[delete("/api/series/<series_id>/videos/<video_id>")]
+async fn remove_video_from_series_api(
+    state: &State<AppState>,
+    series_id: &str,
+    video_id: &str,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    remove_video_from_series(&state.db, video_id).await.map_err(to_api_error)?;
+
+    let detail = get_series_detail(&state.db, series_id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[put("/api/series/<id>/reorder", data = "<req>")]
+async fn reorder_series_api(
+    state: &State<AppState>,
+    id: &str,
+    req: Json<ReorderEpisodesRequest>,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    reorder_series_episodes(&state.db, id, &req.video_ids).await.map_err(to_api_error)?;
+
+    let detail = get_series_detail(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
+}
+
+#[put("/api/video/<id>/progress", data = "<req>")]
+async fn update_progress_api(
+    state: &State<AppState>,
+    id: &str,
+    req: Json<UpdateProgressRequest>,
+) -> Result<Json<WatchProgressResponse>, (Status, Json<ApiError>)> {
+    let completed = req.completed.unwrap_or(false);
+    update_watch_progress(&state.db, id, req.position_seconds, completed).await.map_err(to_api_error)?;
+
+    Ok(Json(WatchProgressResponse {
+        video_id: id.to_string(),
+        position_seconds: req.position_seconds,
+        completed,
+    }))
+}
+
+#[get("/api/video/<id>/progress")]
+async fn get_progress_api(
+    state: &State<AppState>,
+    id: &str,
+) -> Result<Json<WatchProgressResponse>, (Status, Json<ApiError>)> {
+    let progress = get_watch_progress(&state.db, id)
+        .await
+        .map_err(to_api_error)?
+        .unwrap_or(WatchProgressResponse {
+            video_id: id.to_string(),
+            position_seconds: 0,
+            completed: false,
+        });
+
+    Ok(Json(progress))
+}
+
+#[post("/api/videos/bulk/delete", data = "<req>")]
+async fn bulk_delete_api(
+    state: &State<AppState>,
+    req: Json<BulkDeleteRequest>,
+) -> Result<Json<serde_json::Value>, (Status, Json<ApiError>)> {
+    let deleted = bulk_delete_videos(&state.db, &req.video_ids).await.map_err(to_api_error)?;
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
+}
+
+#[post("/api/videos/bulk/add-to-series", data = "<req>")]
+async fn bulk_add_to_series_api(
+    state: &State<AppState>,
+    req: Json<BulkAddToSeriesRequest>,
+) -> Result<Json<SeriesDetail>, (Status, Json<ApiError>)> {
+    add_videos_to_series(&state.db, &req.series_id, &req.video_ids).await.map_err(to_api_error)?;
+
+    let detail = get_series_detail(&state.db, &req.series_id)
+        .await
+        .map_err(to_api_error)?
+        .ok_or_else(|| (Status::NotFound, Json(ApiError { message: "Series not found.".to_string() })))?;
+
+    Ok(Json(detail))
 }
 
 #[post("/upload", data = "<form>")]
@@ -1614,6 +2509,16 @@ async fn watch_page(_id: &str) -> Option<NamedFile> {
     NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
 }
 
+#[get("/series/<_id>")]
+async fn series_page(_id: &str) -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
+}
+
+#[get("/series/<_id>/manage")]
+async fn series_manage_page(_id: &str) -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
+}
+
 #[catch(404)]
 async fn not_found(_req: &Request<'_>) -> Option<NamedFile> {
     NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
@@ -1648,11 +2553,26 @@ fn rocket() -> _ {
                 upload_page,
                 upload_post,
                 watch_page,
+                series_page,
+                series_manage_page,
                 list_videos_api,
+                continue_watching_api,
                 status_api,
                 rename_video,
                 reprocess_video,
                 delete_video,
+                list_series_api,
+                create_series_api,
+                get_series_api,
+                update_series_api,
+                delete_series_api,
+                add_videos_to_series_api,
+                remove_video_from_series_api,
+                reorder_series_api,
+                update_progress_api,
+                get_progress_api,
+                bulk_delete_api,
+                bulk_add_to_series_api,
                 hls_js,
                 hls_js_map
             ],

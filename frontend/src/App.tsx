@@ -3,6 +3,8 @@ import { Layout } from "@/components/layout"
 import { IndexPage } from "@/pages/index"
 import { UploadPage } from "@/pages/upload"
 import { WatchPage } from "@/pages/watch"
+import { SeriesPage } from "@/pages/series"
+import { SeriesManagePage } from "@/pages/series-manage"
 import { NotFoundPage } from "@/pages/not-found"
 
 function App() {
@@ -13,6 +15,8 @@ function App() {
           <Route index element={<IndexPage />} />
           <Route path="upload" element={<UploadPage />} />
           <Route path="watch/:id" element={<WatchPage />} />
+          <Route path="series/:id" element={<SeriesPage />} />
+          <Route path="series/:id/manage" element={<SeriesManagePage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

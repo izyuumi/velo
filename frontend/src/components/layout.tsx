@@ -1,5 +1,5 @@
 import { Link, Outlet } from "react-router-dom"
-import { Upload } from "lucide-react"
+import { Upload, Film } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useEffect } from "react"
 
@@ -19,11 +19,14 @@ export function Layout() {
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container flex h-14 max-w-7xl items-center mx-auto px-4">
-          <Link to="/" className="mr-6 flex items-center space-x-2">
-            <span className="font-bold">Velo</span>
+          <Link to="/" className="mr-6 flex items-center space-x-2 group">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Film className="h-4 w-4 text-white" />
+            </div>
+            <span className="font-bold text-lg tracking-tight">Velo</span>
           </Link>
           <div className="flex flex-1 items-center justify-end space-x-2">
-            <Button asChild size="sm">
+            <Button asChild size="sm" className="bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-600 hover:to-fuchsia-600 text-white border-0">
               <Link to="/upload">
                 <Upload className="h-4 w-4" />
                 Upload
