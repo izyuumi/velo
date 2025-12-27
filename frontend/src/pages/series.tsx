@@ -100,7 +100,7 @@ export function SeriesPage() {
         </Link>
       </Button>
 
-      <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-primary/20 to-primary/5">
+      <div className="relative rounded-lg overflow-hidden bg-muted">
         <div className="absolute inset-0">
           {coverEpisode?.thumbnail ? (
             <img

@@ -24,7 +24,7 @@ export function VideoCard({ video, showCheckbox, isSelected, onSelect, compact }
     : 0
 
   const content = (
-    <Card className={`overflow-hidden hover:bg-accent/50 transition-all hover:scale-[1.02] ${compact ? "" : ""}`}>
+    <Card className={`overflow-hidden transition-colors hover:bg-accent/50 ${compact ? "" : ""}`}>
       <div className="relative aspect-video bg-muted">
         {video.thumbnail ? (
           <img

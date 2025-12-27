@@ -18,8 +18,8 @@ export function SeriesCard({ series }: SeriesCardProps) {
 
   return (
     <Link to={`/series/${series.id}`}>
-      <Card className="overflow-hidden hover:bg-accent/50 transition-all hover:scale-[1.02] group">
-        <div className="relative aspect-video bg-gradient-to-br from-primary/20 to-primary/5">
+      <Card className="overflow-hidden transition-colors hover:bg-accent/50 group">
+        <div className="relative aspect-video bg-muted">
           {series.cover_thumbnail ? (
             <img
               src={series.cover_thumbnail}
@@ -33,10 +33,10 @@ export function SeriesCard({ series }: SeriesCardProps) {
             </div>
           )}
 
-          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+          <div className="absolute inset-0 bg-black/40" />
 
           <div className="absolute top-2 left-2">
-            <Badge variant="secondary" className="bg-primary/90 text-primary-foreground">
+            <Badge variant="secondary" className="bg-black/75 text-white border-0">
               {series.episode_count} {series.episode_count === 1 ? "Episode" : "Episodes"}
             </Badge>
           </div>
@@ -59,8 +59,8 @@ export function SeriesCard({ series }: SeriesCardProps) {
           </div>
 
           <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-            <div className="w-14 h-14 rounded-full bg-primary/90 flex items-center justify-center">
-              <Play className="h-6 w-6 text-primary-foreground ml-1" fill="currentColor" />
+            <div className="w-12 h-12 rounded-full bg-white/90 flex items-center justify-center">
+              <Play className="h-5 w-5 text-black ml-0.5" fill="currentColor" />
             </div>
           </div>
 

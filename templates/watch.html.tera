@@ -7,46 +7,44 @@
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f9fafc;
+      --bg: #fafafa;
       --text: #1f1f1f;
-      --link: #3943d0;
-      --notice-error-bg: #ffe8e8;
-      --notice-error-text: #8a1f1f;
-      --notice-info-bg: #eef3ff;
-      --notice-info-text: #1f3d8a;
+      --muted: #666;
+      --link: #1a1a1a;
+      --border: #ddd;
+      --error: #c74848;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0f1116;
+        --bg: #111;
         --text: #f1f2f4;
-        --link: #8ea2ff;
-        --notice-error-bg: #3b1a1c;
-        --notice-error-text: #ffb4b4;
-        --notice-info-bg: #1a2236;
-        --notice-info-text: #b9c7ff;
+        --muted: #888;
+        --link: #fff;
+        --border: #333;
+        --error: #ff8a80;
       }
     }
     body { font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; background: var(--bg); color: var(--text); }
     a { color: var(--link); }
-    .notice { padding: 10px 12px; border-radius: 8px; margin: 12px 0; }
-    .notice.error { background: var(--notice-error-bg); color: var(--notice-error-text); }
-    .notice.info { background: var(--notice-info-bg); color: var(--notice-info-text); }
+    .notice { padding: 10px 0; margin: 12px 0; font-size: 14px; }
+    .notice.error { color: var(--error); }
+    .notice.info { color: var(--muted); }
     .meta { color: var(--text); margin: 8px 0 16px; display: flex; gap: 12px; flex-wrap: wrap; font-size: 14px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
     .actions button,
     .edit-panel button {
       padding: 8px 12px;
-      border-radius: 8px;
-      border: none;
-      background: var(--link);
-      color: #fff;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
       cursor: pointer;
+      font-size: 13px;
     }
     .actions button.secondary,
     .edit-panel button.secondary {
       background: transparent;
-      color: var(--link);
-      border: 1px solid var(--link);
+      color: var(--muted);
     }
     .edit-panel {
       display: none;
@@ -57,22 +55,21 @@
     .edit-panel input {
       padding: 8px 10px;
       font-size: 14px;
-      border-radius: 8px;
-      border: 1px solid rgba(0,0,0,0.2);
+      border-radius: 4px;
+      border: 1px solid var(--border);
       min-width: 220px;
       background: transparent;
       color: inherit;
     }
     .progress {
-      height: 8px;
-      background: rgba(0,0,0,0.08);
-      border-radius: 999px;
+      height: 4px;
+      background: var(--border);
       overflow: hidden;
     }
     .progress-fill {
       height: 100%;
       width: 0%;
-      background: var(--link);
+      background: var(--text);
       transition: width 120ms ease;
     }
   </style>

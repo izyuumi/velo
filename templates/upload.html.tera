@@ -6,48 +6,42 @@
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f9fafc;
+      --bg: #fafafa;
       --text: #1f1f1f;
-      --muted: #555;
-      --card: #f7f7ff;
-      --card-strong: #eef0ff;
-      --border: #6c7ae0;
-      --border-strong: #3943d0;
-      --link: #3943d0;
-      --error: #c62828;
-      --input-bg: #ffffff;
-      --input-border: #c9cdd9;
+      --muted: #666;
+      --card: #fff;
+      --border: #ddd;
+      --link: #1a1a1a;
+      --error: #c74848;
+      --input-bg: #fff;
+      --input-border: #ccc;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0f1116;
+        --bg: #111;
         --text: #f1f2f4;
-        --muted: #a7adba;
-        --card: #1a1f2d;
-        --card-strong: #21283a;
-        --border: #6a79d6;
-        --border-strong: #8ea2ff;
-        --link: #8ea2ff;
+        --muted: #888;
+        --card: #1a1a1a;
+        --border: #333;
+        --link: #fff;
         --error: #ff8a80;
-        --input-bg: #171b26;
-        --input-border: #2c3448;
+        --input-bg: #1a1a1a;
+        --input-border: #444;
       }
     }
     body { font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; background: var(--bg); color: var(--text); }
     a { color: var(--link); }
     .drop {
       margin-top: 16px;
-      border: 2px dashed var(--border);
-      border-radius: 10px;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
       padding: 28px;
       text-align: center;
       background: var(--card);
-      transition: background 120ms ease, border-color 120ms ease;
       cursor: pointer;
     }
     .drop.dragover {
-      border-color: var(--border-strong);
-      background: var(--card-strong);
+      border-color: var(--text);
     }
     .hint { color: var(--muted); margin-top: 12px; }
     #status { margin-top: 12px; color: var(--link); }
@@ -56,11 +50,11 @@
       width: 100%;
       max-width: 420px;
       padding: 8px;
-      font-size: 16px;
+      font-size: 14px;
       background: var(--input-bg);
       color: var(--text);
       border: 1px solid var(--input-border);
-      border-radius: 6px;
+      border-radius: 4px;
     }
     .field { margin-top: 12px; }
     .queue { margin-top: 8px; }
@@ -70,28 +64,27 @@
     .queue-status { grid-column: 1 / -1; font-size: 13px; color: var(--muted); display: flex; gap: 12px; }
     .progress {
       grid-column: 1 / -1;
-      height: 8px;
-      background: rgba(0,0,0,0.08);
-      border-radius: 999px;
+      height: 4px;
+      background: var(--border);
       overflow: hidden;
     }
     .progress-fill {
       height: 100%;
       width: 0%;
-      background: var(--link);
+      background: var(--text);
       transition: width 120ms ease;
     }
     .progress.processing .progress-fill {
-      background: var(--border-strong);
+      background: var(--muted);
     }
     button {
       margin-top: 16px;
       padding: 10px 16px;
-      font-size: 15px;
+      font-size: 14px;
       background: var(--link);
-      color: #ffffff;
+      color: var(--bg);
       border: none;
-      border-radius: 8px;
+      border-radius: 4px;
       cursor: pointer;
     }
     button:disabled {
