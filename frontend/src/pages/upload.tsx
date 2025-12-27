@@ -25,6 +25,7 @@ export function UploadPage() {
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const activePolls = useRef(0)
 
   const addFiles = useCallback((files: FileList) => {
     const newItems: QueueItem[] = Array.from(files).map((file) => ({
@@ -49,48 +50,56 @@ export function UploadPage() {
   }, [])
 
   const pollStatus = useCallback(async (itemId: string, videoId: string) => {
-    const maxAttempts = 200
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const resp = await fetch(`/api/status/${videoId}`)
-        if (!resp.ok) break
+    activePolls.current += 1
+    try {
+      const maxAttempts = 200
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const resp = await fetch(`/api/status/${videoId}`)
+          if (!resp.ok) break
 
-        const status: StatusResponse = await resp.json()
+          const status: StatusResponse = await resp.json()
 
-        if (status.status === "ready") {
-          setQueue((prev) =>
-            prev.map((item) =>
-              item.id === itemId
-                ? { ...item, status: "ready", processingProgress: 100, watchUrl: status.watch_url }
-                : item
+          if (status.status === "ready") {
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.id === itemId
+                  ? { ...item, status: "ready", processingProgress: 100, watchUrl: status.watch_url }
+                  : item
+              )
             )
-          )
-          return
+            return
+          }
+
+          if (status.status === "error") {
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.id === itemId ? { ...item, status: "error", error: status.error } : item
+              )
+            )
+            return
+          }
+
+          if (typeof status.progress === "number") {
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.id === itemId
+                  ? { ...item, processingProgress: Math.min(99, status.progress ?? 0) }
+                  : item
+              )
+            )
+          }
+        } catch {
+          break
         }
 
-        if (status.status === "error") {
-          setQueue((prev) =>
-            prev.map((item) =>
-              item.id === itemId ? { ...item, status: "error", error: status.error } : item
-            )
-          )
-          return
-        }
-
-        if (typeof status.progress === "number") {
-          setQueue((prev) =>
-            prev.map((item) =>
-              item.id === itemId
-                ? { ...item, processingProgress: Math.min(99, status.progress ?? 0) }
-                : item
-            )
-          )
-        }
-      } catch {
-        break
+        await new Promise((r) => setTimeout(r, 1500))
       }
-
-      await new Promise((r) => setTimeout(r, 1500))
+    } finally {
+      activePolls.current -= 1
+      if (activePolls.current === 0) {
+        setIsUploading(false)
+      }
     }
   }, [])
 
@@ -99,6 +108,7 @@ export function UploadPage() {
     if (pending.length === 0 || isUploading) return
 
     setIsUploading(true)
+    let successCount = 0
 
     for (const item of pending) {
       setQueue((prev) =>
@@ -120,6 +130,7 @@ export function UploadPage() {
           )
         )
 
+        successCount += 1
         pollStatus(item.id, result.id)
       } catch (err) {
         setQueue((prev) =>
@@ -132,7 +143,9 @@ export function UploadPage() {
       }
     }
 
-    setIsUploading(false)
+    if (successCount === 0) {
+      setIsUploading(false)
+    }
   }, [queue, isUploading, pollStatus])
 
   const handleDrop = useCallback(
@@ -311,10 +324,6 @@ export function UploadPage() {
           </div>
         </div>
       )}
-
-      <p className="text-xs text-muted-foreground text-center">
-        Videos are processed with FFmpeg to HLS format for adaptive streaming.
-      </p>
     </div>
   )
 }

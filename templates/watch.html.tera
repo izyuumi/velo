@@ -165,7 +165,7 @@
           }
         });
       } else {
-        video.outerHTML = "<p class=\"notice error\">Your browser can't play HLS. Try Safari or a modern Chrome/Firefox.</p>";
+        video.outerHTML = "<p class=\"notice error\">Your browser doesn't support video playback. Try a different browser.</p>";
       }
       video.addEventListener('error', () => {
         setPlayerStatus('We hit a playback error. Refresh the page or try again later.');

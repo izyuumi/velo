@@ -4,7 +4,6 @@ import Hls from "hls.js"
 import { ArrowLeft, Loader2, AlertCircle, Edit3, Trash2, RefreshCw, Clock, Monitor } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Card } from "@/components/ui/card"
 import {
@@ -90,7 +89,7 @@ export function WatchPage() {
         }
       })
     } else {
-      setPlayerError("Your browser doesn't support HLS playback.")
+      setPlayerError("Your browser doesn't support video playback.")
     }
 
     return () => {
@@ -274,9 +273,6 @@ export function WatchPage() {
               Retry
             </Button>
           )}
-          {status.retries > 0 && (
-            <p className="text-xs text-muted-foreground">Retry attempts: {status.retries}</p>
-          )}
         </Card>
       )}
 
@@ -294,12 +290,6 @@ export function WatchPage() {
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        {isProcessing && <Badge variant="processing">Processing</Badge>}
-        {isError && <Badge variant="error">Failed</Badge>}
-        {isReady && <Badge variant="success">Ready</Badge>}
-        <span className="text-xs text-muted-foreground">ID: {status.id}</span>
-      </div>
     </div>
   )
 }
