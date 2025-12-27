@@ -122,10 +122,6 @@
 
   <button id="uploadBtn" type="button" disabled>Start upload</button>
 
-  <p class="hint">
-    Upload triggers FFmpeg packaging to HLS in the background. Large files will take time; you can refresh the watch page until it’s ready.
-  </p>
-
   <script>
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('file');

@@ -12,7 +12,6 @@ use rocket::serde::json::Json;
 use rocket::tokio::process::Command;
 use rocket::tokio::task;
 use rocket::State;
-use rocket_dyn_templates::{context, Template};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -193,19 +192,6 @@ struct VideoItem {
     created_at: i64,
 }
 
-#[derive(Serialize)]
-struct WatchContext {
-    id: String,
-    ready: bool,
-    error: Option<String>,
-    title: String,
-    duration_seconds: Option<i64>,
-    width: Option<i64>,
-    height: Option<i64>,
-    created_at: i64,
-    retries: i64,
-    upload_available: bool,
-}
 
 #[derive(Serialize)]
 struct UploadResult {
@@ -924,23 +910,6 @@ fn write_processing_log(id: &str, level: &str, message: &str, detail: &str) -> s
     file.write_all(line.as_bytes())
 }
 
-fn read_processing_error(id: &str) -> Option<String> {
-    let contents = fs::read_to_string(processing_log_path(id)).ok()?;
-    for line in contents.lines().rev() {
-        if !line.contains("level=ERROR") {
-            continue;
-        }
-        if let Some(start) = line.find("user_message=") {
-            let msg_start = start + "user_message=".len();
-            let remainder = &line[msg_start..];
-            if let Some(end) = remainder.find(" detail=") {
-                return Some(remainder[..end].trim().to_string());
-            }
-            return Some(remainder.trim().to_string());
-        }
-    }
-    None
-}
 
 struct MediaMetadata {
     duration_seconds: Option<i64>,
@@ -1494,37 +1463,13 @@ async fn reconcile_processing_jobs(pool: &SqlitePool) -> AppResult<Vec<String>> 
     Ok(resume_ids)
 }
 
-#[get("/")]
-async fn index(state: &State<AppState>) -> Template {
+#[get("/api/videos")]
+async fn list_videos_api(state: &State<AppState>) -> Json<Vec<VideoItem>> {
     let videos = match list_videos(&state.db).await {
         Ok(videos) if !videos.is_empty() => videos,
         Ok(_) | Err(_) => list_videos_from_fs(),
     };
-    let mut processing_videos = Vec::new();
-    let mut ready_videos = Vec::new();
-    let mut error_videos = Vec::new();
-
-    for video in videos {
-        match video.status.as_str() {
-            STATUS_PROCESSING => processing_videos.push(video),
-            STATUS_ERROR => error_videos.push(video),
-            _ => ready_videos.push(video),
-        }
-    }
-
-    Template::render(
-        "index",
-        context! {
-            processing_videos,
-            ready_videos,
-            error_videos
-        },
-    )
-}
-
-#[get("/upload")]
-fn upload_page() -> Template {
-    Template::render("upload", context! {})
+    Json(videos)
 }
 
 #[get("/api/status/<id>")]
@@ -1649,87 +1594,45 @@ async fn upload_post(
     }))
 }
 
-#[get("/watch/<id>")]
-async fn watch(state: &State<AppState>, id: &str) -> Template {
-    let id_owned = id.to_string();
-    let out_dir = final_hls_dir(id);
-    let master = out_dir.join("master.m3u8");
 
-    let mut ready = master.exists();
-    let mut error = read_processing_error(id);
-    let mut title = id_owned.clone();
-    let mut duration_seconds = None;
-    let mut width = None;
-    let mut height = None;
-    let mut created_at = unix_ts();
-    let mut retries = 0;
-    let mut upload_available = upload_dir().join(format!("{id}.mp4")).exists();
+fn frontend_dist_dir() -> PathBuf {
+    env::var("FRONTEND_DIST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("frontend/dist"))
+}
 
-    if let Ok(Some(status)) = read_video_status_full(&state.db, id).await {
-        if status.status == STATUS_ERROR {
-            error = status.error.clone().or(error);
-        }
-        if status.status == STATUS_READY {
-            ready = true;
-        }
-        title = status.title;
-        duration_seconds = status.duration_seconds;
-        width = status.width;
-        height = status.height;
-        created_at = status.created_at;
-        retries = status.retries;
-        upload_available = status.upload_available;
-    }
+#[get("/")]
+async fn index_page() -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
+}
 
-    let ctx = WatchContext {
-        id: id_owned,
-        ready,
-        error,
-        title,
-        duration_seconds,
-        width,
-        height,
-        created_at,
-        retries,
-        upload_available,
-    };
-    Template::render("watch", context! { ctx })
+#[get("/upload")]
+async fn upload_page() -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
+}
+
+#[get("/watch/<_id>")]
+async fn watch_page(_id: &str) -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
 }
 
 #[catch(404)]
-fn not_found(req: &Request<'_>) -> Template {
-    Template::render(
-        "error",
-        context! {
-            code: 404,
-            title: "Not Found",
-            message: format!("We couldn't find {}", req.uri()),
-        },
-    )
+async fn not_found(_req: &Request<'_>) -> Option<NamedFile> {
+    NamedFile::open(frontend_dist_dir().join("index.html")).await.ok()
 }
 
 #[catch(413)]
-fn payload_too_large() -> Template {
-    Template::render(
-        "error",
-        context! {
-            code: 413,
-            title: "Upload Too Large",
-            message: "That file is larger than the server allows. Try a smaller upload or adjust Rocket.toml limits.",
-        },
-    )
+fn payload_too_large() -> Json<ApiError> {
+    Json(ApiError {
+        message: "Upload too large. Try a smaller file or adjust server limits.".to_string(),
+    })
 }
 
 #[catch(500)]
-fn server_error() -> Template {
-    Template::render(
-        "error",
-        context! {
-            code: 500,
-            title: "Server Error",
-            message: "Something went wrong on the server. Please try again in a moment.",
-        },
-    )
+fn server_error() -> Json<ApiError> {
+    Json(ApiError {
+        message: "Server error. Please try again later.".to_string(),
+    })
 }
 
 #[launch]
@@ -1737,16 +1640,17 @@ fn rocket() -> _ {
     ensure_dirs().ok();
 
     let hls_path = hls_dir();
-    let static_path = PathBuf::from("static");
+    let frontend_assets = frontend_dist_dir().join("assets");
 
     rocket::build()
         .mount(
             "/",
             routes![
-                index,
+                index_page,
                 upload_page,
                 upload_post,
-                watch,
+                watch_page,
+                list_videos_api,
                 status_api,
                 rename_video,
                 reprocess_video,
@@ -1756,8 +1660,7 @@ fn rocket() -> _ {
             ],
         )
         .mount("/hls", FileServer::from(hls_path))
-        .mount("/static", FileServer::from(static_path))
-        .attach(Template::fairing())
+        .mount("/assets", FileServer::from(frontend_assets))
         .attach(AdHoc::on_ignite("SQLite", |rocket| async {
             let db = init_db().await.expect("failed to initialize sqlite");
             rocket.manage(AppState {

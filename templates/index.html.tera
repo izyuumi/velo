@@ -91,6 +91,38 @@
     .empty { color: var(--muted); }
     .empty-card { margin-top: 16px; padding: 18px; background: var(--card); border-radius: 12px; box-shadow: 0 8px 22px var(--shadow); }
     .empty-card a { color: var(--link); font-weight: 600; }
+    .accordion { margin-top: 18px; }
+    .accordion-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 14px;
+      background: var(--card);
+      border: 1px solid rgba(57, 67, 208, 0.25);
+      border-radius: 10px;
+      cursor: pointer;
+      width: 100%;
+      text-align: left;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .accordion-toggle:hover { background: var(--card); border-color: rgba(57, 67, 208, 0.45); }
+    .accordion-toggle::before {
+      content: "▸";
+      font-size: 12px;
+      transition: transform 180ms ease;
+      display: inline-block;
+    }
+    .accordion.open .accordion-toggle::before { transform: rotate(90deg); }
+    .accordion-content {
+      display: none;
+      padding-top: 14px;
+    }
+    .accordion.open .accordion-content { display: block; }
   </style>
 </head>
 <body>
@@ -107,66 +139,67 @@
     </div>
   {% else %}
     {% if processing_videos | length > 0 %}
-      <section class="section">
-        <h2 class="section-title">Processing <span class="count-pill">{{ processing_videos | length }}</span></h2>
-        <div class="grid">
-          {% for v in processing_videos %}
-            <a class="card processing" href="/watch/{{ v.id }}" data-created-at="{{ v.created_at }}" data-duration="{{ v.duration_seconds | default(value=0) }}" data-status="{{ v.status }}" data-progress="{{ v.progress | default(value="") }}">
-              <div class="thumb">
-                {% if v.thumbnail %}
-                  <img src="{{ v.thumbnail }}" alt="{{ v.title }}" loading="lazy" />
-                {% endif %}
-              </div>
-              <div class="meta">
-                <p class="title">{{ v.title }}</p>
-                <div class="meta-line">
-                  {% if v.width and v.height %}
-                    <span>{{ v.width }}×{{ v.height }}</span>
+      <div class="accordion" id="processingAccordion">
+        <button class="accordion-toggle" type="button" aria-expanded="false" aria-controls="processingContent">
+          Processing <span class="count-pill">{{ processing_videos | length }}</span>
+        </button>
+        <div class="accordion-content" id="processingContent">
+          <div class="grid">
+            {% for v in processing_videos %}
+              <a class="card processing" href="/watch/{{ v.id }}" data-created-at="{{ v.created_at }}" data-duration="{{ v.duration_seconds | default(value=0) }}" data-status="{{ v.status }}" data-progress="{{ v.progress | default(value="") }}">
+                <div class="thumb">
+                  {% if v.thumbnail %}
+                    <img src="{{ v.thumbnail }}" alt="{{ v.title }}" loading="lazy" />
                   {% endif %}
-                  <span class="duration">--:--</span>
-                  <span class="created">--</span>
                 </div>
-                <div class="status-line">
-                  <span class="status-badge status-processing">Processing</span>
-                  <span class="progress-text">Preparing...</span>
+                <div class="meta">
+                  <p class="title">{{ v.title }}</p>
+                  <div class="meta-line">
+                    {% if v.width and v.height %}
+                      <span>{{ v.width }}×{{ v.height }}</span>
+                    {% endif %}
+                    <span class="duration">--:--</span>
+                    <span class="created">--</span>
+                  </div>
+                  <div class="status-line">
+                    <span class="status-badge status-processing">Processing</span>
+                    <span class="progress-text">Preparing...</span>
+                  </div>
+                  <div class="progress-bar unknown" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-fill"></div>
+                  </div>
+                  <div class="id">{{ v.id }}</div>
                 </div>
-                <div class="progress-bar unknown" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-                  <div class="progress-fill"></div>
-                </div>
-                <div class="id">{{ v.id }}</div>
-              </div>
-            </a>
-          {% endfor %}
+              </a>
+            {% endfor %}
+          </div>
         </div>
-      </section>
+      </div>
     {% endif %}
 
     {% if ready_videos | length > 0 %}
-      <section class="section">
-        <h2 class="section-title">Ready <span class="count-pill">{{ ready_videos | length }}</span></h2>
-        <div class="grid">
-          {% for v in ready_videos %}
-            <a class="card" href="/watch/{{ v.id }}" data-created-at="{{ v.created_at }}" data-duration="{{ v.duration_seconds | default(value=0) }}">
-              <div class="thumb">
-                {% if v.thumbnail %}
-                  <img src="{{ v.thumbnail }}" alt="{{ v.title }}" loading="lazy" />
+      <div class="grid" style="margin-top: 18px;">
+        {% for v in ready_videos %}
+          <a class="card" href="/watch/{{ v.id }}" data-created-at="{{ v.created_at }}" data-duration="{{ v.duration_seconds | default(value=0) }}">
+            <div class="thumb">
+              {% if v.thumbnail %}
+                <img src="{{ v.thumbnail }}" alt="{{ v.title }}" loading="lazy" />
+              {% endif %}
+            </div>
+            <div class="meta">
+              <p class="title">{{ v.title }}</p>
+              <div class="meta-line">
+                {% if v.width and v.height %}
+                  <span>{{ v.width }}×{{ v.height }}</span>
                 {% endif %}
+                <span class="duration">--:--</span>
+                <span class="created">--</span>
               </div>
-              <div class="meta">
-                <p class="title">{{ v.title }}</p>
-                <div class="meta-line">
-                  {% if v.width and v.height %}
-                    <span>{{ v.width }}×{{ v.height }}</span>
-                  {% endif %}
-                  <span class="duration">--:--</span>
-                  <span class="created">--</span>
-                </div>
-                <div class="id">{{ v.id }}</div>
-              </div>
-            </a>
-          {% endfor %}
-        </div>
-      </section>
+              <div class="id">{{ v.id }}</div>
+            </div>
+          </a>
+        {% endfor %}
+      </div>
     {% endif %}
 
     {% if error_videos | length > 0 %}
@@ -205,6 +238,15 @@
   {% endif %}
 
   <script>
+    const accordion = document.getElementById('processingAccordion');
+    if (accordion) {
+      const toggle = accordion.querySelector('.accordion-toggle');
+      toggle.addEventListener('click', () => {
+        const isOpen = accordion.classList.toggle('open');
+        toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      });
+    }
+
     const cards = Array.from(document.querySelectorAll('.card'));
     const fmtDuration = (sec) => {
       if (!sec || sec <= 0) return '--:--';
