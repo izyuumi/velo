@@ -14,7 +14,13 @@ fn unix_ts() -> i64 {
 
 pub async fn list_series(pool: &SqlitePool) -> AppResult<Vec<SeriesItem>> {
     let rows = sqlx::query(
-        "SELECT s.id, s.title, s.description, s.cover_video_id, s.created_at, s.updated_at,
+        "SELECT s.id, s.title, s.description,
+                COALESCE(s.cover_video_id, (
+                    SELECT id FROM videos
+                    WHERE series_id = s.id AND status = 'ready'
+                    ORDER BY episode_number ASC LIMIT 1
+                )) AS cover_video_id,
+                s.created_at, s.updated_at,
                 COUNT(v.id) as episode_count,
                 SUM(CASE WHEN v.duration_seconds IS NOT NULL THEN v.duration_seconds ELSE 0 END) as total_duration,
                 SUM(CASE WHEN wp.completed = 1 THEN 1 ELSE 0 END) as watched_count,
