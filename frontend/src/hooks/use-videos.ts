@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import type { VideoItem, StatusResponse } from "@/types"
+import { appUrl } from "@/lib/url"
 
 export function useVideos() {
   const [videos, setVideos] = useState<VideoItem[]>([])
@@ -8,7 +9,7 @@ export function useVideos() {
 
   const fetchVideos = useCallback(async () => {
     try {
-      const resp = await fetch("/api/videos")
+      const resp = await fetch(appUrl("/api/videos"))
       if (!resp.ok) throw new Error("Failed to fetch videos")
       const data = await resp.json()
       setVideos(data)
@@ -36,7 +37,7 @@ export function useVideoStatus(id: string) {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const resp = await fetch(`/api/status/${id}`)
+      const resp = await fetch(appUrl(`/api/status/${id}`))
       if (!resp.ok) {
         if (resp.status === 404) {
           setError("Video not found")
@@ -66,4 +67,3 @@ export function useVideoStatus(id: string) {
 
   return { status, loading, error, refetch: fetchStatus }
 }
-

@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { Upload, Loader2, Video, AlertCircle, Plus, Trash2, FolderPlus, X, CheckSquare, Play, Search } from "lucide-react"
+import { Upload, Loader2, Video, AlertCircle, Plus, Trash2, FolderPlus, X, CheckSquare, Search, Download } from "lucide-react"
+import { useBulkDownload } from "@/hooks/use-bulk-download"
+import { BulkDownloadBar } from "@/components/bulk-download-bar"
+import { offlineSupported } from "@/lib/offline"
 import { VideoCard } from "@/components/video-card"
 import { SeriesCard } from "@/components/series-card"
 import { Button } from "@/components/ui/button"
@@ -15,14 +18,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { fetchVideos, fetchSeries, fetchContinueWatching, bulkDeleteVideos, createSeries, bulkAddToSeries } from "@/lib/api"
+import { fetchVideos, fetchSeries, bulkDeleteVideos, createSeries, bulkAddToSeries } from "@/lib/api"
 import type { VideoItem, SeriesItem } from "@/types"
 
 export function IndexPage() {
   const navigate = useNavigate()
   const [videos, setVideos] = useState<VideoItem[]>([])
   const [series, setSeries] = useState<SeriesItem[]>([])
-  const [continueWatching, setContinueWatching] = useState<VideoItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
@@ -37,6 +39,7 @@ export function IndexPage() {
   const [newSeriesTitle, setNewSeriesTitle] = useState("")
   const [isDeleting, setIsDeleting] = useState(false)
   const [isCreating, setIsCreating] = useState(false)
+  const bulk = useBulkDownload()
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 300)
@@ -45,14 +48,12 @@ export function IndexPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [videosData, seriesData, continueData] = await Promise.all([
+      const [videosData, seriesData] = await Promise.all([
         fetchVideos(debouncedSearch || undefined),
         fetchSeries(),
-        debouncedSearch ? Promise.resolve([]) : fetchContinueWatching(),
       ])
       setVideos(videosData)
       setSeries(seriesData)
-      setContinueWatching(continueData)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error")
@@ -226,6 +227,20 @@ export function IndexPage() {
                   Add to Series
                 </Button>
               )}
+              {offlineSupported() && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    bulk.start(videos.filter((v) => selectedIds.has(v.id)))
+                    clearSelection()
+                  }}
+                  disabled={selectedIds.size === 0 || !!bulk.progress}
+                >
+                  <Download className="h-4 w-4" />
+                  Download
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -245,19 +260,7 @@ export function IndexPage() {
         </div>
       </div>
 
-      {continueWatching.length > 0 && !debouncedSearch && (
-        <section className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Play className="h-4 w-4 text-primary" />
-            <h2 className="font-semibold">Continue Watching</h2>
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {continueWatching.map((video) => (
-              <VideoCard key={video.id} video={video} compact />
-            ))}
-          </div>
-        </section>
-      )}
+      <BulkDownloadBar {...bulk} />
 
       {series.length > 0 && !debouncedSearch && (
         <section className="space-y-4">

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams, useNavigate, Link } from "react-router-dom"
 import Hls from "hls.js"
-import { ArrowLeft, Loader2, AlertCircle, Edit3, Trash2, RefreshCw, Clock, Monitor, ChevronLeft, ChevronRight, List, X, Play } from "lucide-react"
+import { ArrowLeft, Loader2, AlertCircle, Edit3, Trash2, RefreshCw, Clock, Monitor, ChevronLeft, ChevronRight, List, X, Play, Download, CheckCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
@@ -21,6 +21,8 @@ import {
 import { formatDuration, formatDate } from "@/lib/format"
 import { renameVideo, deleteVideo, reprocessVideo, updateWatchProgress, fetchSeriesDetail } from "@/lib/api"
 import type { StatusResponse, VideoItem } from "@/types"
+import { appUrl } from "@/lib/url"
+import { downloadVideo, getDownload, removeDownload, offlineSupported } from "@/lib/offline"
 
 const PROGRESS_SAVE_INTERVAL = 10000
 const AUTOPLAY_COUNTDOWN = 10
@@ -44,52 +46,88 @@ export function WatchPage() {
   const [isDeleting, setIsDeleting] = useState(false)
   const [isReprocessing, setIsReprocessing] = useState(false)
 
+  const [downloaded, setDownloaded] = useState(() => (id ? !!getDownload(id) : false))
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null)
+  const [removingDownload, setRemovingDownload] = useState(false)
+  const downloadAbortRef = useRef<AbortController | null>(null)
+
   const [showEpisodeList, setShowEpisodeList] = useState(false)
   const [showAutoplay, setShowAutoplay] = useState(false)
   const [autoplayCountdown, setAutoplayCountdown] = useState(AUTOPLAY_COUNTDOWN)
 
-  const fetchStatus = useCallback(async () => {
+  const fetchStatus = useCallback(async (signal?: AbortSignal) => {
     if (!id) return
     try {
-      const resp = await fetch(`/api/status/${id}`)
+      const resp = await fetch(appUrl(`/api/status/${id}`), { signal })
       if (!resp.ok) {
         if (resp.status === 404) {
+          if (signal?.aborted) return
           setError("Video not found")
           return
         }
         throw new Error("Failed to fetch status")
       }
       const data: StatusResponse = await resp.json()
+      if (signal?.aborted) return
       setStatus(data)
       setEditTitle(data.title)
       setError(null)
 
       if (data.series_id) {
-        const seriesData = await fetchSeriesDetail(data.series_id)
+        const seriesData = await fetchSeriesDetail(data.series_id, signal)
+        if (signal?.aborted) return
         setSeriesEpisodes(seriesData.episodes)
       }
     } catch (err) {
+      if ((err instanceof DOMException && err.name === "AbortError") || (err instanceof Error && err.name === "AbortError")) {
+        return
+      }
       setError(err instanceof Error ? err.message : "Unknown error")
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) {
+        setLoading(false)
+      }
     }
   }, [id])
 
   useEffect(() => {
-    fetchStatus()
+    const controller = new AbortController()
+    void fetchStatus(controller.signal)
+    return () => controller.abort()
   }, [fetchStatus])
 
   useEffect(() => {
+    setLoading(true)
+    setStatus(null)
+    setSeriesEpisodes([])
+    setError(null)
+    setShowAutoplay(false)
+    setAutoplayCountdown(AUTOPLAY_COUNTDOWN)
+    setPlayerError(null)
+    setDownloaded(id ? !!getDownload(id) : false)
+    downloadAbortRef.current?.abort()
+    setDownloadProgress(null)
+  }, [id])
+
+  useEffect(() => {
     if (!status || status.status === "ready") return
-    const interval = setInterval(fetchStatus, 2000)
-    return () => clearInterval(interval)
+    const controller = new AbortController()
+    const interval = setInterval(() => {
+      void fetchStatus(controller.signal)
+    }, 2000)
+    return () => {
+      controller.abort()
+      clearInterval(interval)
+    }
   }, [status, fetchStatus])
 
   useEffect(() => {
     if (!status || status.status !== "ready" || !videoRef.current) return
 
     const video = videoRef.current
-    const src = `/hls/${id}/master.m3u8`
+    // Downloaded: play the single cached variant playlist so no uncached rendition is requested.
+    const cached = id ? getDownload(id) : undefined
+    const src = appUrl(`/hls/${id}/${cached ? cached.variant : "master.m3u8"}`)
 
     const resumePosition = status.watch_position && status.watch_position > 0 && !status.watch_completed
       ? status.watch_position
@@ -103,7 +141,8 @@ export function WatchPage() {
 
     video.addEventListener("loadedmetadata", handleLoadedMetadata)
 
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    // Prefer hls.js when cached: native Safari HLS bypasses the service worker cache.
+    if (video.canPlayType("application/vnd.apple.mpegurl") && !(cached && Hls.isSupported())) {
       video.src = src
     } else if (Hls.isSupported()) {
       const hls = new Hls()
@@ -131,7 +170,37 @@ export function WatchPage() {
         hlsRef.current = null
       }
     }
-  }, [status, id])
+  }, [status, id, loading, downloaded])
+
+  const handleDownload = async () => {
+    if (!id || !status) return
+    const controller = new AbortController()
+    downloadAbortRef.current = controller
+    setDownloadProgress(0)
+    try {
+      await downloadVideo(id, status.title, (done, total) => setDownloadProgress(total ? done / total : 0), controller.signal)
+      setDownloaded(true)
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError(err instanceof Error ? err.message : "Download failed")
+      }
+    } finally {
+      setDownloadProgress(null)
+    }
+  }
+
+  const handleRemoveDownload = async () => {
+    if (!id) return
+    setRemovingDownload(true)
+    try {
+      await removeDownload(id)
+      setDownloaded(false)
+    } catch {
+      setError("Could not remove download. Try again.")
+    } finally {
+      setRemovingDownload(false)
+    }
+  }
 
   useEffect(() => {
     if (!status || status.status !== "ready" || !videoRef.current || !id) return
@@ -373,6 +442,24 @@ export function WatchPage() {
               <h1 className="text-xl font-bold">{status.title}</h1>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {isReady && offlineSupported() && (
+                downloadProgress !== null ? (
+                  <Button variant="ghost" size="sm" onClick={() => downloadAbortRef.current?.abort()} title="Cancel download">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {Math.round(downloadProgress * 100)}%
+                  </Button>
+                ) : downloaded ? (
+                  <Button variant="ghost" size="sm" onClick={handleRemoveDownload} disabled={removingDownload} title="Remove download">
+                    {removingDownload ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4 text-green-600" />}
+                    {removingDownload ? "Removing…" : "Downloaded · Remove"}
+                  </Button>
+                ) : (
+                  <Button variant="ghost" size="sm" onClick={handleDownload} title="Download for offline">
+                    <Download className="h-4 w-4" />
+                    Download
+                  </Button>
+                )
+              )}
               <Button variant="ghost" size="icon" onClick={() => setIsEditing(true)}>
                 <Edit3 className="h-4 w-4" />
               </Button>
@@ -469,7 +556,7 @@ export function WatchPage() {
                   {nextEpisode.thumbnail && (
                     <div className="w-32 h-20 rounded overflow-hidden shrink-0">
                       <img
-                        src={nextEpisode.thumbnail}
+                        src={appUrl(nextEpisode.thumbnail)}
                         alt={nextEpisode.title}
                         className="w-full h-full object-cover"
                       />
@@ -522,7 +609,7 @@ export function WatchPage() {
                 <div className="w-16 h-10 rounded overflow-hidden bg-muted shrink-0 relative">
                   {episode.thumbnail && (
                     <img
-                      src={episode.thumbnail}
+                      src={appUrl(episode.thumbnail)}
                       alt=""
                       className="w-full h-full object-cover"
                     />

@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from "react"
 import { useParams, useNavigate, Link } from "react-router-dom"
-import { ArrowLeft, Loader2, AlertCircle, Play, Settings, Trash2, Film } from "lucide-react"
+import { ArrowLeft, Loader2, AlertCircle, Play, Settings, Trash2, Film, Download, CheckCircle } from "lucide-react"
+import { useBulkDownload } from "@/hooks/use-bulk-download"
+import { BulkDownloadBar } from "@/components/bulk-download-bar"
+import { getDownload, offlineSupported, removeDownload } from "@/lib/offline"
 import { Button } from "@/components/ui/button"
 import { VideoCard } from "@/components/video-card"
 import {
@@ -16,6 +19,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { formatDuration, formatDate } from "@/lib/format"
 import { fetchSeriesDetail, deleteSeries } from "@/lib/api"
+import { appUrl } from "@/lib/url"
 import type { SeriesDetail } from "@/types"
 
 export function SeriesPage() {
@@ -26,6 +30,9 @@ export function SeriesPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const bulk = useBulkDownload()
+  const [, bump] = useState(0) // re-render after remove-all
+  const [removingDownloads, setRemovingDownloads] = useState(false)
 
   const fetchData = useCallback(async () => {
     if (!id) return
@@ -104,7 +111,7 @@ export function SeriesPage() {
         <div className="absolute inset-0">
           {coverEpisode?.thumbnail ? (
             <img
-              src={coverEpisode.thumbnail}
+              src={appUrl(coverEpisode.thumbnail)}
               alt={series.title}
               className="w-full h-full object-cover opacity-30 blur-sm"
             />
@@ -119,7 +126,7 @@ export function SeriesPage() {
           <div className="w-48 h-28 md:w-64 md:h-36 rounded-lg overflow-hidden bg-muted shrink-0 shadow-lg">
             {coverEpisode?.thumbnail ? (
               <img
-                src={coverEpisode.thumbnail}
+                src={appUrl(coverEpisode.thumbnail)}
                 alt={series.title}
                 className="w-full h-full object-cover"
               />
@@ -159,6 +166,35 @@ export function SeriesPage() {
                 </Button>
               )}
 
+              {offlineSupported() && readyEpisodes.length > 0 && (
+                readyEpisodes.every((ep) => getDownload(ep.id)) ? (
+                  <Button
+                    variant="outline"
+                    disabled={removingDownloads}
+                    onClick={async () => {
+                      setRemovingDownloads(true)
+                      try {
+                        for (const ep of readyEpisodes) await removeDownload(ep.id)
+                        bump((n) => n + 1)
+                      } catch {
+                        setError("Could not remove all downloads. Try again.")
+                      } finally {
+                        setRemovingDownloads(false)
+                      }
+                    }}
+                    title="Remove all downloads"
+                  >
+                    {removingDownloads ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4 text-green-600" />}
+                    {removingDownloads ? "Removing…" : "Downloaded · Remove All"}
+                  </Button>
+                ) : (
+                  <Button variant="outline" onClick={() => bulk.start(readyEpisodes)} disabled={!!bulk.progress}>
+                    <Download className="h-4 w-4" />
+                    Download All
+                  </Button>
+                )
+              )}
+
               <Button variant="outline" asChild>
                 <Link to={`/series/${id}/manage`}>
                   <Settings className="h-4 w-4" />
@@ -192,6 +228,8 @@ export function SeriesPage() {
         </div>
       </div>
 
+      <BulkDownloadBar {...bulk} />
+
       <section className="space-y-4">
         <h2 className="font-semibold text-lg">Episodes</h2>
         {series.episodes.length === 0 ? (
@@ -214,4 +252,3 @@ export function SeriesPage() {
     </div>
   )
 }
-

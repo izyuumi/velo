@@ -3,6 +3,7 @@ import { Play, Film } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { formatDuration } from "@/lib/format"
+import { appUrl } from "@/lib/url"
 import type { SeriesItem } from "@/types"
 
 interface SeriesCardProps {
@@ -22,7 +23,7 @@ export function SeriesCard({ series }: SeriesCardProps) {
         <div className="relative aspect-video bg-muted">
           {series.cover_thumbnail ? (
             <img
-              src={series.cover_thumbnail}
+              src={appUrl(series.cover_thumbnail)}
               alt={series.title}
               className="absolute inset-0 w-full h-full object-cover"
               loading="lazy"
@@ -77,4 +78,3 @@ export function SeriesCard({ series }: SeriesCardProps) {
     </Link>
   )
 }
-

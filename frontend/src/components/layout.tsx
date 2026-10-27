@@ -1,5 +1,5 @@
 import { Link, Outlet } from "react-router-dom"
-import { Upload, Film } from "lucide-react"
+import { Upload, Film, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useEffect } from "react"
 
@@ -24,6 +24,12 @@ export function Layout() {
             <span className="font-semibold text-lg tracking-tight">Velo</span>
           </Link>
           <div className="flex flex-1 items-center justify-end space-x-2">
+            <Button asChild size="sm" variant="ghost">
+              <Link to="/downloaded">
+                <Download className="h-4 w-4" />
+                Downloaded
+              </Link>
+            </Button>
             <Button asChild size="sm" variant="outline">
               <Link to="/upload">
                 <Upload className="h-4 w-4" />

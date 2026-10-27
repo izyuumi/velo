@@ -3,7 +3,7 @@ services:
     build: .
     container_name: hls-tube
     ports:
-      - "35773:8000"
+      - "127.0.0.1:35773:8000"
     volumes:
       - ./data:/data
     environment:

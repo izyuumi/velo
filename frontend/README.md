@@ -1,5 +1,7 @@
 # React + TypeScript + Vite
 
+Velo's Downloaded page lists videos saved in this browser for offline playback. Downloads belong to the current device/browser, not the server library. Remove clears cached media on this device; it leaves the server video intact.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

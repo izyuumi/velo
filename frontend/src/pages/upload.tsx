@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { uploadVideo } from "@/lib/api"
 import type { StatusResponse } from "@/types"
+import { appUrl } from "@/lib/url"
 
 interface QueueItem {
   id: string
@@ -55,7 +56,7 @@ export function UploadPage() {
       const maxAttempts = 200
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
-          const resp = await fetch(`/api/status/${videoId}`)
+          const resp = await fetch(appUrl(`/api/status/${videoId}`))
           if (!resp.ok) break
 
           const status: StatusResponse = await resp.json()

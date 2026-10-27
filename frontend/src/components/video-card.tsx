@@ -1,9 +1,11 @@
 import { Link } from "react-router-dom"
-import { Play, AlertCircle, Loader2, CheckCircle } from "lucide-react"
+import { Play, AlertCircle, Loader2, CheckCircle, Download } from "lucide-react"
+import { getDownload } from "@/lib/offline"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { formatDuration } from "@/lib/format"
+import { appUrl } from "@/lib/url"
 import type { VideoItem } from "@/types"
 
 interface VideoCardProps {
@@ -28,7 +30,7 @@ export function VideoCard({ video, showCheckbox, isSelected, onSelect, compact }
       <div className="relative aspect-video bg-muted">
         {video.thumbnail ? (
           <img
-            src={video.thumbnail}
+            src={appUrl(video.thumbnail)}
             alt={video.title}
             className="absolute inset-0 w-full h-full object-cover"
             loading="lazy"
@@ -59,11 +61,18 @@ export function VideoCard({ video, showCheckbox, isSelected, onSelect, compact }
           </div>
         )}
 
-        {video.episode_number && (
-          <div className="absolute top-2 right-2 bg-black/75 text-white text-xs px-1.5 py-0.5 rounded">
-            Ep {video.episode_number}
-          </div>
-        )}
+        <div className="absolute top-2 right-2 flex items-center gap-1">
+          {getDownload(video.id) && (
+            <div className="bg-black/75 text-white p-1 rounded" title="Available offline">
+              <Download className="h-3 w-3" />
+            </div>
+          )}
+          {video.episode_number && (
+            <div className="bg-black/75 text-white text-xs px-1.5 py-0.5 rounded">
+              Ep {video.episode_number}
+            </div>
+          )}
+        </div>
 
         {isReady && video.duration_seconds && (
           <div className="absolute bottom-2 right-2 bg-black/75 text-white text-xs px-1.5 py-0.5 rounded">

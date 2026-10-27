@@ -1,20 +1,15 @@
 import type { StatusResponse, UploadResult, VideoItem, SeriesItem, SeriesDetail, WatchProgress } from "@/types"
+import { appUrl } from "@/lib/url"
 
 export async function fetchVideos(search?: string): Promise<VideoItem[]> {
   const url = search ? `/api/videos?search=${encodeURIComponent(search)}` : "/api/videos"
-  const resp = await fetch(url)
+  const resp = await fetch(appUrl(url))
   if (!resp.ok) throw new Error("Failed to fetch videos")
   return resp.json()
 }
 
-export async function fetchContinueWatching(): Promise<VideoItem[]> {
-  const resp = await fetch("/api/videos/continue")
-  if (!resp.ok) throw new Error("Failed to fetch continue watching")
-  return resp.json()
-}
-
 export async function fetchVideoStatus(id: string): Promise<StatusResponse> {
-  const resp = await fetch(`/api/status/${id}`)
+  const resp = await fetch(appUrl(`/api/status/${id}`))
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Failed to fetch status")
@@ -33,7 +28,7 @@ export async function uploadVideo(
     form.append("title", title)
 
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", "/upload")
+    xhr.open("POST", appUrl("/upload"))
 
     xhr.upload.addEventListener("progress", (evt) => {
       if (evt.lengthComputable) {
@@ -68,7 +63,7 @@ export async function renameVideo(
   id: string,
   title: string
 ): Promise<StatusResponse> {
-  const resp = await fetch(`/api/video/${id}/rename`, {
+  const resp = await fetch(appUrl(`/api/video/${id}/rename`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -81,7 +76,7 @@ export async function renameVideo(
 }
 
 export async function deleteVideo(id: string): Promise<void> {
-  const resp = await fetch(`/api/video/${id}`, { method: "DELETE" })
+  const resp = await fetch(appUrl(`/api/video/${id}`), { method: "DELETE" })
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Delete failed")
@@ -89,7 +84,7 @@ export async function deleteVideo(id: string): Promise<void> {
 }
 
 export async function reprocessVideo(id: string): Promise<StatusResponse> {
-  const resp = await fetch(`/api/video/${id}/reprocess`, { method: "POST" })
+  const resp = await fetch(appUrl(`/api/video/${id}/reprocess`), { method: "POST" })
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Reprocess failed")
@@ -98,13 +93,13 @@ export async function reprocessVideo(id: string): Promise<StatusResponse> {
 }
 
 export async function fetchSeries(): Promise<SeriesItem[]> {
-  const resp = await fetch("/api/series")
+  const resp = await fetch(appUrl("/api/series"))
   if (!resp.ok) throw new Error("Failed to fetch series")
   return resp.json()
 }
 
-export async function fetchSeriesDetail(id: string): Promise<SeriesDetail> {
-  const resp = await fetch(`/api/series/${id}`)
+export async function fetchSeriesDetail(id: string, signal?: AbortSignal): Promise<SeriesDetail> {
+  const resp = await fetch(appUrl(`/api/series/${id}`), { signal })
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Failed to fetch series")
@@ -117,7 +112,7 @@ export async function createSeries(
   description?: string,
   videoIds?: string[]
 ): Promise<SeriesDetail> {
-  const resp = await fetch("/api/series", {
+  const resp = await fetch(appUrl("/api/series"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title, description, video_ids: videoIds }),
@@ -133,7 +128,7 @@ export async function updateSeries(
   id: string,
   updates: { title?: string; description?: string; cover_video_id?: string }
 ): Promise<SeriesDetail> {
-  const resp = await fetch(`/api/series/${id}`, {
+  const resp = await fetch(appUrl(`/api/series/${id}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -146,7 +141,7 @@ export async function updateSeries(
 }
 
 export async function deleteSeries(id: string): Promise<void> {
-  const resp = await fetch(`/api/series/${id}`, { method: "DELETE" })
+  const resp = await fetch(appUrl(`/api/series/${id}`), { method: "DELETE" })
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Failed to delete series")
@@ -157,7 +152,7 @@ export async function addVideosToSeries(
   seriesId: string,
   videoIds: string[]
 ): Promise<SeriesDetail> {
-  const resp = await fetch(`/api/series/${seriesId}/videos`, {
+  const resp = await fetch(appUrl(`/api/series/${seriesId}/videos`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ video_ids: videoIds }),
@@ -173,7 +168,7 @@ export async function removeVideoFromSeries(
   seriesId: string,
   videoId: string
 ): Promise<SeriesDetail> {
-  const resp = await fetch(`/api/series/${seriesId}/videos/${videoId}`, {
+  const resp = await fetch(appUrl(`/api/series/${seriesId}/videos/${videoId}`), {
     method: "DELETE",
   })
   if (!resp.ok) {
@@ -187,7 +182,7 @@ export async function reorderSeriesEpisodes(
   seriesId: string,
   videoIds: string[]
 ): Promise<SeriesDetail> {
-  const resp = await fetch(`/api/series/${seriesId}/reorder`, {
+  const resp = await fetch(appUrl(`/api/series/${seriesId}/reorder`), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ video_ids: videoIds }),
@@ -204,7 +199,7 @@ export async function updateWatchProgress(
   positionSeconds: number,
   completed?: boolean
 ): Promise<WatchProgress> {
-  const resp = await fetch(`/api/video/${videoId}/progress`, {
+  const resp = await fetch(appUrl(`/api/video/${videoId}/progress`), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ position_seconds: positionSeconds, completed }),
@@ -217,7 +212,7 @@ export async function updateWatchProgress(
 }
 
 export async function getWatchProgress(videoId: string): Promise<WatchProgress> {
-  const resp = await fetch(`/api/video/${videoId}/progress`)
+  const resp = await fetch(appUrl(`/api/video/${videoId}/progress`))
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}))
     throw new Error(data.message || "Failed to get progress")
@@ -226,7 +221,7 @@ export async function getWatchProgress(videoId: string): Promise<WatchProgress> 
 }
 
 export async function bulkDeleteVideos(videoIds: string[]): Promise<{ ok: boolean; deleted: number }> {
-  const resp = await fetch("/api/videos/bulk/delete", {
+  const resp = await fetch(appUrl("/api/videos/bulk/delete"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ video_ids: videoIds }),
@@ -242,7 +237,7 @@ export async function bulkAddToSeries(
   videoIds: string[],
   seriesId: string
 ): Promise<SeriesDetail> {
-  const resp = await fetch("/api/videos/bulk/add-to-series", {
+  const resp = await fetch(appUrl("/api/videos/bulk/add-to-series"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ video_ids: videoIds, series_id: seriesId }),

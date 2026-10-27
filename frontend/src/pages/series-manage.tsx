@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { formatDuration } from "@/lib/format"
 import { fetchSeriesDetail, fetchVideos, updateSeries, reorderSeriesEpisodes, addVideosToSeries, removeVideoFromSeries } from "@/lib/api"
+import { appUrl } from "@/lib/url"
 import type { SeriesDetail, VideoItem } from "@/types"
 
 interface SortableEpisodeProps {
@@ -55,7 +56,7 @@ function SortableEpisode({ episode, onRemove, onSetCover, isCover }: SortableEpi
 
       <div className="w-20 h-12 rounded overflow-hidden bg-muted shrink-0">
         {episode.thumbnail ? (
-          <img src={episode.thumbnail} alt="" className="w-full h-full object-cover" />
+          <img src={appUrl(episode.thumbnail)} alt="" className="w-full h-full object-cover" />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
             <Film className="h-4 w-4 text-muted-foreground" />
@@ -343,7 +344,7 @@ export function SeriesManagePage() {
                 >
                   <div className="w-20 h-12 rounded overflow-hidden bg-muted shrink-0">
                     {video.thumbnail ? (
-                      <img src={video.thumbnail} alt="" className="w-full h-full object-cover" />
+                      <img src={appUrl(video.thumbnail)} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <Film className="h-4 w-4 text-muted-foreground" />
@@ -377,4 +378,3 @@ export function SeriesManagePage() {
     </div>
   )
 }
-
